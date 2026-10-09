@@ -8,7 +8,7 @@ Everything below was exercised live on 2026-10-09 against that box. Each endpoin
 | Tag | Meaning |
 |---|---|
 | ✅ | called successfully, response captured |
-| 🔬 | behaviour confirmed by error envelope / route oracle, payload not yet exercised |
+| 🔬 | behavior confirmed by error envelope / route oracle, payload not yet exercised |
 | ❓ | still unknown |
 
 ---
@@ -365,7 +365,7 @@ GET /resources/mydrive/zz-autodir          → 200   {"isDir":true}   (did not e
 ```
 
 So DriveDrop's `/Public` default needs no `mkdir` and no existence check — first drop creates
-it. Normalise the value anyway (`Public`, `Public/`, `/Public/` → `/Public`); a trailing slash
+it. Normalize the value anyway (`Public`, `Public/`, `/Public/` → `/Public`); a trailing slash
 is not silently trimmed by the server.
 
 ### `checksum` is CRC32, 8 lowercase hex chars
@@ -493,7 +493,7 @@ Confirmed present on the server:
 
 | Call | Result |
 |---|---|
-| `GET /api/v1/drives/{id}/files//children` | `301` → `/api/v1/drives/{id}/files/children` — **route exists**, the 301 is slash-normalisation |
+| `GET /api/v1/drives/{id}/files//children` | `301` → `/api/v1/drives/{id}/files/children` — **route exists**, the 301 is slash-normalization |
 | `GET /api/v1/drives/{id}/files/x/children` | `404 {"err":{"msg":"Not Found","code":"ErrNotFound"}}` — note this is a *different* 404 (`msg:"Not Found"`) than the router's, i.e. the handler ran and the path missed |
 | `POST /api/v1/drives/{id}/files/{name}` + tus headers | `201` + `Location: /api/v1/files/<uuid>` — same tus session as `POST /files` |
 
@@ -714,7 +714,7 @@ GET  /api/integrations          API keys (session-auth)
 
 ## 11. Port / topology notes ✅
 
-| Port | Service | Unknown-path behaviour |
+| Port | Service | Unknown-path behavior |
 |---|---|---|
 | 443 | nginx: portal + `/proxy/*` | 1533-byte portal SPA fallback |
 | 9443 | UniFi core gateway | `{"code":404,"codeS":"CODE_NOT_FOUND","msg":"The API was not found.","error":"you entered no-man zone"}` |

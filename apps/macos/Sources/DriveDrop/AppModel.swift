@@ -102,7 +102,7 @@ final class AppModel: ObservableObject {
     private var busyCount = 0
 
     /// The credential store is swappable so the races around it can be driven from a test
-    /// without touching the real Keychain. Production behaviour is unchanged.
+    /// without touching the real Keychain. Production behavior is unchanged.
     nonisolated(unsafe) static var keychainRead: @Sendable (String) -> String? = { Keychain.password(for: $0) }
     nonisolated(unsafe) static var keychainWrite: @Sendable (String, String) -> Void = { Keychain.setPassword($0, for: $1) }
 
@@ -338,7 +338,7 @@ final class AppModel: ObservableObject {
     /// reason — "it failed" is what made this unusable: an .app bundle produced a yellow
     /// triangle and "96 bytes", which told you nothing.
     ///
-    /// Measured behaviour that drove these rules (`Data(contentsOf:)` result):
+    /// Measured behavior that drove these rules (`Data(contentsOf:)` result):
     ///   regular file     reads
     ///   0-byte file      reads, 0 B            -> allowed; the console accepts it
     ///   symlink -> file  **throws**            -> must resolve first; this was a real bug

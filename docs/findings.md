@@ -138,6 +138,6 @@ Details in `spec/api.md` §7, §8, §12.
 
 ## Cleanup
 
-Test artefacts created during discovery: one share link on `/mydrive/.DS_Store`
+Test artifacts created during discovery: one share link on `/mydrive/.DS_Store`
 (**deleted**, confirmed `{"data":"OK"}`) and ~44 abandoned tus upload sessions, which the
 server GCs. No files were written to the drives.

@@ -10,7 +10,7 @@ library and a terminal client, both verified against a real UNAS Pro console.
 | `src/models.rs` | domain types, mirrored from the macOS app |
 | `src/api.rs` | HTTP client on the endpoints proven in [`spec/api.md`](../../spec/api.md) |
 | `src/bin/drivedrop.rs` | CLI: `login`, `usage`, `ls`, `links`, `put`, `share`, `expire`, `rm`, `rm-link` |
-| `cargo test` | 9 unit tests, no network: path normalisation, CRC32, base64 metadata, chunk size |
+| `cargo test` | 9 unit tests, no network: path normalization, CRC32, base64 metadata, chunk size |
 
 Verified live: login (30-day `rememberMe` token), storage usage, folder listing, share
 links. Upload and share-creation use the same code path as the macOS app, which is

@@ -5,12 +5,20 @@ Drag-and-drop file upload for **UniFi Drive** (UNAS Pro) that hands you a sharea
 Drop a file → it uploads → you get a link. Right-click (or two-finger click) a row to
 copy the URL, open it, set an expiration, or delete it.
 
-Two native clients, one behaviour:
-
-| Platform | Stack | Look |
+| Platform | Stack | State |
 |---|---|---|
-| macOS | Swift 6 + SwiftUI | liquid glass / `ultraThinMaterial`, borderless rounded panel |
-| Windows | Rust + `eframe`/`egui` + `windows` crate | Fluent, real **Mica** backdrop via DWM |
+| **macOS** | Swift 6 + SwiftUI, liquid-glass panel | complete — menu bar, folder browsing, drag-and-drop |
+| **Windows** | Rust library + terminal client | API client works; **no GUI yet** |
+
+## Screenshots
+
+| Menu-bar popover | Folder view | Right-click actions |
+|---|---|---|
+| <img src="docs/images/menu-bar.png" width="240"> | <img src="docs/images/main-window.png" width="240"> | <img src="docs/images/context-menu.png" width="240"> |
+
+The popover is the primary surface: current folder, free capacity, live upload progress,
+the links in that folder, and a session countdown. The window adds browsing and the
+scope switch between *this folder* and *all links*.
 
 ```
 unifi-drive-drop/
@@ -83,8 +91,12 @@ currently takes credentials from the environment; wiring it to Credential Manage
 work, and until then do not put `DRIVEDROP_PASS` in a shared shell profile.
 - Never commit `.token` — it is gitignored.
 
-## Test artefacts
+## Test artifacts
 
-Discovery created and then removed: three 0-byte files in `mydrive` (deleted, now in trash)
-and one share link on `/mydrive/.DS_Store` (deleted, `{"data":"OK"}`). The share-link count
-is back to its original 6. Abandoned tus sessions are GC'd by the server.
+Probing the API created files, and they were all removed again: three 0-byte files in
+`mydrive` (deleted, now in trash) and one share link on `/mydrive/.DS_Store` (deleted,
+`{"data":"OK"}`). Abandoned tus sessions are garbage-collected by the server.
+
+The live integration test is held to the same rule. It writes only files named
+`drivedrop-selftest-*` and trashes them on every exit path, including a panic, so a failed
+run cannot litter your Drive. See `apps/windows/tests/live.rs`.

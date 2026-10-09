@@ -116,7 +116,7 @@ fn live_end_to_end() {
     let odd = fixture(&narrow);
     let odd_item = c.upload(&odd, "/Public", &|_| {}).expect("upload narrow-nbsp file");
     cleanup.paths.borrow_mut().push(odd_item.file_id.clone());
-    assert!(odd_item.file_id.contains('\u{202f}'), "server normalised the name away");
+    assert!(odd_item.file_id.contains('\u{202f}'), "server normalized the name away");
     let listed = c.browse("/Public").expect("browse Public");
     let typed_with_normal_space = odd_item.file_id.replace('\u{202f}', " ");
     assert_ne!(typed_with_normal_space, odd_item.file_id);

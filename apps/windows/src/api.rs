@@ -35,7 +35,7 @@ const TUS: &str = "1.0.0";
 // ---------------------------------------------------------------- path helpers
 
 /// Folder as the user thinks about it: `/`, `/Public`. No trailing slash, always absolute.
-/// The server does *not* trim a trailing slash, so normalise before sending.
+/// The server does *not* trim a trailing slash, so normalize before sending.
 pub fn normalize_dir(folder: &str) -> String {
     let s = folder.trim();
     // Rebuild from the non-empty segments: that drops a trailing slash, a doubled slash and

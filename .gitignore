@@ -25,3 +25,6 @@ tools/pii.json
 
 # Rendered icon intermediates; the .icns is committed so a clone needs no Xcode just to brand the bundle.
 apps/macos/resources/AppIcon.iconset/
+
+# Release artifacts are published to GitHub Releases, not committed.
+apps/macos/dist/

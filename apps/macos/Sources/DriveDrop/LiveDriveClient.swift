@@ -231,7 +231,7 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
     ///      like success until the object never appears.
     /// `dir` is relative to the **personal-drive root** and — verified — is created on
     /// demand by the upload itself, so no mkdir round-trip is needed for `/Public`.
-    /// Normalised so "Public", "Public/" and "/Public/" all mean the same thing.
+    /// Normalized so "Public", "Public/" and "/Public/" all mean the same thing.
     /// Poll `GET /resources/<path>` until the object is queryable, or `timeout` elapses.
     static func waitForObject(_ path: String, session: DriveSession,
                               timeout: TimeInterval) async -> Bool {

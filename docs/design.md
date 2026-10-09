@@ -1,6 +1,6 @@
 # DriveDrop — UI / design spec
 
-One behaviour, two native expressions. Nothing here is a webview pretending to be native.
+One behavior, two native expressions. Nothing here is a webview pretending to be native.
 
 ## Core interaction
 
@@ -27,7 +27,7 @@ The whole window is the drop target — not a boxed "drop zone" you have to aim 
 - **Single click** a row → selects. **Double click** → opens the share URL in the browser.
 - **Right-click / two-finger click** → context menu:
 
-| Item | Shortcut | Behaviour |
+| Item | Shortcut | Behavior |
 |---|---|---|
 | Copy share URL | ⌘C / Ctrl+C | link to clipboard, toast "Copied" |
 | Copy direct download URL | ⇧⌘C / Ctrl+Shift+C | raw file URL, bypasses the share page |
@@ -56,7 +56,7 @@ Target macOS 26+. Use the real glass APIs, fall back to materials on older syste
 - Drop feedback: the glass *lifts* — `GlassEffectInteraction` scale + a 1pt accent ring,
   animated with `.spring(duration: 0.3, bounce: 0.25)`.
 - Typography: `.system(.body, design: .rounded)` for the drop headline, default SF elsewhere.
-- Accent: read the user's accent colour, don't hardcode.
+- Accent: read the user's accent color, don't hardcode.
 - `ControlGroup` + `.menuStyle(.borderlessButton)` for the context menu so it matches.
 - Menu bar extra (`MenuBarExtra`) with the same list, so it lives in the menu bar permanently.
 
@@ -71,7 +71,7 @@ Target macOS 26+. Use the real glass APIs, fall back to materials on older syste
   Caption 12 for metadata.
 - Metrics: 4px grid. Row height 40. Corner radius 8 on cards, 4 on buttons.
   List padding 16, window padding 12.
-- Colour: pull the user's accent colour from the registry
+- Colour: pull the user's accent color from the registry
   (`HKCU\Software\Microsoft\Windows\DWM\AccentColor`) and build the light/dark
   surface ramp from it, so it matches the OS theme rather than a hardcoded palette.
 - Rounded window corners are default on Win11; add `DWMWA_WINDOW_CORNER_PREFERENCE`
