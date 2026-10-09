@@ -1,7 +1,7 @@
 //! Drive API client. Mirrors `apps/macos/Sources/DriveDrop/LiveDriveClient.swift`.
 //!
-//! Every route here is documented and marked ✅ in `spec/api.md`. The guesses this file
-//! used to make — `GET /api/v1/files?limit=`, `POST /api/v1/shares`, `/api/v1/public`,
+//! Every route here is documented as Verified in `spec/api.md`. The guesses this file used
+//! to make — `GET /api/v1/files?limit=`, `POST /api/v1/shares`, `/api/v1/public`,
 //! `DELETE /api/v1/files/{id}` — do not exist on the console and are gone.
 //!
 //! Four traps, all learned the expensive way, are encoded below:

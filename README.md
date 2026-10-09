@@ -50,7 +50,7 @@ unifi-drive-drop/
 | **Direct download URL** | ✅ `/file-sharing/links/{id}/files/{resourcePath}` |
 | **Delete a file** | ✅ `DELETE /resources/{path}` → moves to trash |
 | Upload handshake | ✅ tus `201`+`Location`, `204`+`Upload-Offset` |
-| **Upload lands the object** | ✅ the whole thing was `checksum` = real CRC32, plus the `/proxy/drive` prefix on `Location` — see `spec/api.md` §7 |
+| **Upload lands the object** | ✅ the whole thing was `checksum` = real CRC32, plus the `/proxy/drive` prefix on `Location` — see `spec/api.md` §8 |
 | Session lifetime | ✅ `rememberMe: true` → 30-day token, transparent re-login on 401 |
 | macOS app | ✅ complete: menu-bar resident, folder browsing, drag-and-drop with a stated policy for every input shape, drawn app icon |
 | Windows client (library + CLI) | ✅ compiles clean, `cargo test` green, login/usage/browse/links verified live against a real console |

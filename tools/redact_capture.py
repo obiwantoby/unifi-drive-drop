@@ -30,7 +30,10 @@ from typing import Callable, Union
 Q = r'(?:\\?")'                       # a double quote, escaped or not
 UUID = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 # Values that are obviously not secrets, so re-running never mangles the docs.
-NOT_A_SECRET = r'(?!\s*(?:\.\.\.|string\b|optional\b|<REDACTED))'
+# `…`, `...`, `***` and `<anything>` are the universal "this is a shape, not a value"
+# conventions. Without them the scrubber eats the request bodies in the spec, and a
+# reference that cannot show a body is not a reference.
+NOT_A_SECRET = r'(?!\s*(?:\.\.\.|\u2026|\*\*?\*+|<|string\b|optional\b|example\b|<REDACTED))'
 
 Repl = Union[str, Callable[[re.Match], str]]
 
@@ -140,8 +143,14 @@ FIXTURES: list[tuple[str, str, list[str]]] = [
     (".md", "use api_key = AAAA5555bbbb6666CCCC7777dddd8888 for the api key",
      ["<REDACTED-API-KEY>"]),
     (".md", "curl -d 'password=hunter2&x=1'", ["password=<REDACTED>"]),
-    # placeholders must survive untouched
+    # Placeholders must survive untouched. A scrubber that eats the request bodies in the
+    # spec destroys the thing the spec exists to communicate, so "does not fire on a
+    # placeholder" is tested as hard as "does fire on a secret".
     ('.md', '{"username": "string", "password": "string"}', ['"password": "string"']),
+    ('.md', '{"password": "\u2026"}', ['"password": "\u2026"']),
+    ('.md', '{"password":"***"}', ['"password":"***"']),
+    ('.md', '{"password":"<your console password>"}', ['"password":"<your console password>"']),
+    ('.md', '{"password": "optional"}', ['"password": "optional"']),
     (".md", '"password": "optional"', ['"password": "optional"']),
 ]
 

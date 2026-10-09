@@ -41,7 +41,8 @@ target\release\drivedrop.exe put .\invoice.pdf --dir \Public --share --expire 7d
 
 ## The four traps this client encodes
 
-All four are documented with evidence in `spec/api.md`:
+All four are normative constraints in [`spec/api.md`](../../spec/api.md) (C1, C2,
+C4, C5); the evidence is in [`spec/discovery.md`](../../spec/discovery.md):
 
 1. `POST /api/auth/login` returns **403** if a `TOKEN` cookie is already attached, so login
    replaces the whole client to get an empty cookie jar.

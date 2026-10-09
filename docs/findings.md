@@ -134,7 +134,9 @@ them are single words — they are hyphenated (`file-sharing`, `trash-resources`
    page is a client-side route).
 3. `/api/v1/search` parameters (GET hangs).
 
-Details in `spec/api.md` §7, §8, §12.
+The normative reference is [`spec/api.md`](../spec/api.md); the investigation,
+the isolation tests and the ruled-out alternatives are in
+[`spec/discovery.md`](../spec/discovery.md).
 
 ## Cleanup
 
