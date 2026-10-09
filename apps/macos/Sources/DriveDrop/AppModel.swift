@@ -95,6 +95,37 @@ final class AppModel: ObservableObject {
     nonisolated(unsafe) static var keychainRead: @Sendable (String) -> String? = { Keychain.password(for: $0) }
     nonisolated(unsafe) static var keychainWrite: @Sendable (String, String) -> Void = { Keychain.setPassword($0, for: $1) }
 
+    /// Serialises credential-store access.
+    ///
+    /// Epochs alone are not enough. `Task.detached` gives no ordering guarantee, so a clear
+    /// can be overtaken by an older save and leave the Keychain holding something different
+    /// from the in-memory client. Every op carries the epoch it was issued under; the actor
+    /// drops anything older, and it is the only thing that touches the store.
+    ///
+    /// The methods are synchronous on purpose: synchronous actor methods cannot interleave
+    /// with each other, which is what makes the sequence atomic.
+    private actor CredentialStore {
+        private var latest = 0
+
+        private func accepts(_ epoch: Int) -> Bool {
+            if epoch < latest { return false }
+            latest = epoch
+            return true
+        }
+
+        func read(_ epoch: Int, _ host: String) -> String? {
+            guard accepts(epoch) else { return nil }
+            return AppModel.keychainRead(host)
+        }
+
+        func write(_ epoch: Int, _ password: String, _ host: String) {
+            guard accepts(epoch) else { return }
+            AppModel.keychainWrite(password, host)
+        }
+    }
+
+    private let store = CredentialStore()
+
     init() {
         tick = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.objectWillChange.send() }
@@ -118,11 +149,12 @@ final class AppModel: ObservableObject {
     func clearSavedPassword() {
         credGen += 1
         let gen = credGen
+        refreshGen += 1        // also retire any refresh still in flight
         let h = host
         ready = false
         status = "Removing saved password…"
         Task {
-            await Task.detached(priority: .userInitiated) { Self.keychainWrite("", h) }.value
+            await store.write(gen, "", h)
             applyClient(password: "", cred: gen)
         }
     }
@@ -130,17 +162,21 @@ final class AppModel: ObservableObject {
     private func bootstrap() async {
         credGen += 1
         let gen = credGen
+        refreshGen += 1
         let h = host
         status = "Unlocking saved sign-in…"
-        // Off the main actor, so a Keychain prompt or a slow securityd never stalls launch.
-        let read = Task.detached(priority: .userInitiated) { Self.keychainRead(h) }
         // The read can stall indefinitely behind macOS's "app wants to use your
         // confidential information" dialog. Without this the app just looks broken.
-        let warn = Task {
+        // It checks the epoch too: if this bootstrap has already been superseded, the newer
+        // operation owns the status line and this one must not stamp on it.
+        let warn = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1.5))
-            if !Task.isCancelled { status = "Waiting for macOS Keychain approval…" }
+            guard !Task.isCancelled, let self, self.credGen == gen else { return }
+            self.status = "Waiting for macOS Keychain approval…"
         }
-        let pw = await read.value
+        // Awaited directly on the actor, which runs it off the main thread and keeps the
+        // credential ops ordered.
+        let pw = await store.read(gen, h)
         warn.cancel()
         applyClient(password: pw ?? "", cred: gen)
     }
@@ -171,10 +207,9 @@ final class AppModel: ObservableObject {
         status = "Saving…"
         credGen += 1
         let gen = credGen
+        refreshGen += 1
         Task {
-            if !pass.isEmpty {
-                await Task.detached(priority: .userInitiated) { Self.keychainWrite(pass, h) }.value
-            }
+            if !pass.isEmpty { await store.write(gen, pass, h) }
             applyClient(password: pass, cred: gen)
         }
     }
@@ -185,6 +220,9 @@ final class AppModel: ObservableObject {
     /// folder must not take the global link list down with it.
     func refresh() async {
         busyCount += 1
+        // Must be set here as well as recomputed in the defer: with only the defer, a single
+        // refresh never shows the spinner at all (busyCount goes 0->1, then 1->0).
+        isBusy = true
         defer { busyCount -= 1; isBusy = busyCount > 0 }
         refreshGen += 1
         let gen = refreshGen
@@ -202,7 +240,11 @@ final class AppModel: ObservableObject {
         // usage/items/linksByPath assignments through.
         if let uu = try? await u, gen == refreshGen { usage = uu }
         if let ll = try? await l, gen == refreshGen {
-            items = ll
+            // Rows that only exist locally — an upload in flight, or one that failed — are not
+            // in the server's list, so a refresh that replaces `items` wholesale would make
+            // the progress bar vanish mid-transfer. Carry them over.
+            let localOnly = items.filter { $0.phase != .ready }
+            items = localOnly + ll
             // Two links can point at the same path; first one wins deterministically.
             linksByPath = Dictionary(ll.compactMap { s -> (String, ShareItem)? in
                 s.fileId.isEmpty ? nil : (s.fileId, s)
@@ -211,6 +253,8 @@ final class AppModel: ObservableObject {
         do {
             let ee = try await e
             if gen == refreshGen { entries = ee }
+        } catch is CancellationError {
+            // A superseded navigation, not a folder problem. Leave entries alone.
         } catch {
             if gen == refreshGen { entries = [] }
         }

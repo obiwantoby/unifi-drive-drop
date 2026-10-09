@@ -2,19 +2,14 @@ import Foundation
 
 // Concurrency regression tests for AppModel. Run with scripts/test-races.sh.
 //
-// These exist because three real races shipped in the first cut of the folder-aware model:
-//   1. refresh() wrote usage/items/linksByPath before its generation guard, so a slow older
-//      fetch finishing last overwrote newer data.
-//   2. isBusy was a bool, so the first finishing refresh hid the spinner while others were
-//      still in flight.
-//   3. bootstrap()'s Keychain read can block for seconds behind the macOS access prompt; if
-//      the user saved new credentials meanwhile, the stale read applied afterwards and
-//      silently restored the old session.
-//
-// Each test is written to FAIL against that original code — verified by patching the guards
-// back out and re-running. A concurrency test that passes either way proves nothing.
+// Each test must FAIL against the code it replaced. That is not ceremony: the first version
+// of the isBusy test passed while the code was still broken, because it sampled `isBusy`
+// after the second refresh's `defer` had already run. Only a test aimed at a lone refresh
+// exposed it. Prefer the narrowest observation that distinguishes the two.
 
-final class FakeClient: DriveClient, @unchecked Sendable {
+// --------------------------------------------------------------------------- fakes
+
+final class ScriptedClient: DriveClient, @unchecked Sendable {
     struct Behavior { let delay: Double; let tag: String }
     var behaviors: [Behavior] = []
     var n = 0
@@ -47,6 +42,53 @@ final class FakeClient: DriveClient, @unchecked Sendable {
     func delete(_ i: ShareItem) async throws {}
 }
 
+/// A client whose every call takes the same fixed time, for single-refresh assertions.
+final class UniformClient: DriveClient, @unchecked Sendable {
+    let delay: Double
+    init(delay: Double) { self.delay = delay }
+    func login() async throws {}
+    func usage() async throws -> Usage {
+        if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+        return Usage(usedBytes: 1, totalBytes: 2)
+    }
+    func list() async throws -> [ShareItem] {
+        if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+        return []
+    }
+    func browse(_ d: String) async throws -> [FileEntry] {
+        if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+        return []
+    }
+    func upload(from url: URL, to folder: String,
+                progress: @escaping @Sendable (Double) -> Void) async throws -> ShareItem {
+        throw DriveError.unsupported("not used in race tests")
+    }
+    func createShare(for fileId: String, expiration: Expiration,
+                     password: String?) async throws -> ShareItem {
+        throw DriveError.unsupported("not used in race tests")
+    }
+    func setExpiration(_ i: ShareItem, _ e: Expiration) async throws -> ShareItem {
+        throw DriveError.unsupported("not used in race tests")
+    }
+    func delete(_ i: ShareItem) async throws {}
+}
+
+/// Stand-in for the Keychain: records what "disk" holds, can be made slow.
+final class FakeStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String
+    var writeDelay: Double = 0
+
+    init(_ initial: String) { value = initial }
+
+    func read() -> String { lock.lock(); defer { lock.unlock() }; return value }
+    func write(_ pw: String) {
+        if writeDelay > 0 { Thread.sleep(forTimeInterval: writeDelay) }
+        lock.lock(); value = pw; lock.unlock()
+    }
+    var current: String { lock.lock(); defer { lock.unlock() }; return value }
+}
+
 var failures = 0
 func expect(_ ok: Bool, _ what: String, _ detail: String = "") {
     print("  \(ok ? "PASS" : "FAIL")  \(what)")
@@ -54,11 +96,17 @@ func expect(_ ok: Bool, _ what: String, _ detail: String = "") {
     if !ok { failures += 1 }
 }
 
+func pendingRow(_ tag: String) -> ShareItem {
+    ShareItem(id: "pending-\(tag)", fileId: "", name: tag, size: 10, shareURL: nil,
+              directURL: nil, createdAt: .now, expiresAt: nil, phase: .uploading(0.5),
+              progress: 0.5)
+}
+
 Task { @MainActor in
-    // 1 ------------------------------------------------------------------------------
-    // Refresh A starts first but finishes last. Its data must be discarded.
+
+    // 1 -- a slow refresh must not clobber a newer one ----------------------------------
     do {
-        let f = FakeClient()
+        let f = ScriptedClient()
         f.behaviors = [.init(delay: 0.5, tag: "OLD"), .init(delay: 0.01, tag: "NEW")]
         let m = AppModel(forTesting: f)
         async let a = m.refresh()
@@ -69,10 +117,21 @@ Task { @MainActor in
                "final item = \(m.items.first?.name ?? "none")")
     }
 
-    // 2 ------------------------------------------------------------------------------
-    // The spinner must stay up until the *last* refresh finishes, not the first.
+    // 2 -- a LONE refresh must show the spinner -----------------------------------------
+    // Sampling after a second refresh hides this; sample the single case directly.
     do {
-        let f = FakeClient()
+        let m = AppModel(forTesting: UniformClient(delay: 0.3))
+        async let r = m.refresh()
+        try? await Task.sleep(for: .milliseconds(120))
+        let mid = m.isBusy
+        _ = await r
+        expect(mid == true, "lone refresh shows the spinner while in flight", "mid=\(mid)")
+        expect(m.isBusy == false, "spinner cleared once it finishes")
+    }
+
+    // 3 -- overlapping refreshes: spinner survives the first finisher -------------------
+    do {
+        let f = ScriptedClient()
         f.behaviors = [.init(delay: 0.5, tag: "A"), .init(delay: 0.05, tag: "B")]
         let m = AppModel(forTesting: f)
         async let a = m.refresh()
@@ -81,27 +140,70 @@ Task { @MainActor in
         try? await Task.sleep(for: .milliseconds(250))   // B done, A still running
         let mid = m.isBusy
         _ = await (a, b)
-        expect(mid == true, "isBusy still true while one refresh remains", "mid=\(mid)")
-        expect(m.isBusy == false, "isBusy cleared once both finished", "after=\(m.isBusy)")
+        expect(mid == true, "spinner stays up while one refresh remains", "mid=\(mid)")
+        expect(m.isBusy == false, "spinner cleared once both finished")
     }
 
-    // 3 ------------------------------------------------------------------------------
-    // A blocked Keychain read must lose to a save the user made while it was blocked.
+    // 4 -- a blocked Keychain read must not undo a later save ----------------------------
     do {
-        AppModel.keychainRead = { _ in
-            Thread.sleep(forTimeInterval: 0.5)            // the securityd access prompt
-            return "OLDPW"
-        }
-        AppModel.keychainWrite = { _, _ in }
+        let store = FakeStore("OLDPW")
+        AppModel.keychainRead = { _ in Thread.sleep(forTimeInterval: 0.5); return store.read() }
+        AppModel.keychainWrite = { pw, _ in store.write(pw) }
         let m = AppModel(forTesting: MockDriveClient())
         m.reload()                                        // epoch 1, read blocks
         try? await Task.sleep(for: .milliseconds(100))
-        m.saveCredentials(host: "192.0.2.10", user: "***REMOVED***", pass: "NEWPW")  // epoch 2
+        m.saveCredentials(host: "192.0.2.10", user: "***REMOVED***", pass: "NEWPW")   // epoch 2
         try? await Task.sleep(for: .seconds(1.2))
         let pw = (m.client as? LiveDriveClient)?.session.password ?? "none"
         expect(pw == "NEWPW", "stale Keychain read does not undo a newer save",
-               "live session password = \(pw)")
+               "session password = \(pw)")
         expect(m.ready, "ready reflects the newest epoch")
+    }
+
+    // 5 -- credential writes stay in epoch order -----------------------------------------
+    // Without serialisation the older, slower write can land last and the Keychain ends up
+    // holding a password the app no longer believes in.
+    do {
+        let store = FakeStore("SEED")
+        AppModel.keychainRead = { _ in store.read() }
+        AppModel.keychainWrite = { pw, _ in store.write(pw) }
+        let m = AppModel(forTesting: MockDriveClient())
+        store.writeDelay = 0.4
+        m.saveCredentials(host: "h", user: "u", pass: "SLOW")     // epoch 1, slow write
+        try? await Task.sleep(for: .milliseconds(60))
+        store.writeDelay = 0
+        m.clearSavedPassword()                                     // epoch 2, fast write
+        try? await Task.sleep(for: .seconds(1.2))
+        expect(store.current == "", "credential writes land in epoch order",
+               "keychain holds \(store.current.debugDescription)")
+    }
+
+    // 6 -- a superseded bootstrap must not leave the prompt warning stuck ---------------
+    do {
+        let store = FakeStore("PW")
+        AppModel.keychainRead = { _ in Thread.sleep(forTimeInterval: 0.6); return store.read() }
+        AppModel.keychainWrite = { pw, _ in store.write(pw) }
+        let m = AppModel(forTesting: MockDriveClient())
+        m.reload()                                                 // epoch 1, slow
+        try? await Task.sleep(for: .milliseconds(300))             // warn fires here
+        m.saveCredentials(host: "h", user: "u", pass: "NEW")       // epoch 2 owns status
+        try? await Task.sleep(for: .seconds(1.4))
+        expect(m.status != "Waiting for macOS Keychain approval…",
+               "superseded bootstrap does not strand the approval warning",
+               "status = \(m.status.debugDescription)")
+    }
+
+    // 7 -- an in-flight upload row survives a refresh -----------------------------------
+    do {
+        let f = ScriptedClient()
+        f.behaviors = [.init(delay: 0, tag: "SERVER")]
+        let m = AppModel(forTesting: f)
+        m.items = [pendingRow("big.mov")]
+        await m.refresh()
+        let survived = m.items.contains { $0.name == "big.mov" }
+        expect(survived, "uploading row is not wiped by a refresh",
+               "items = \(m.items.map(\.name))")
+        expect(m.items.contains { $0.name == "SERVER" }, "server rows still present after merge")
     }
 
     print(failures == 0 ? "\nALL RACES PASSED" : "\n\(failures) RACE(S) FAILED")
