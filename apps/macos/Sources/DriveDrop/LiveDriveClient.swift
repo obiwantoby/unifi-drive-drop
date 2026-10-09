@@ -101,9 +101,12 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
             progress: 1
         )
         // Owner-side direct link. Needs our session cookie, so it is NOT a share URL.
-        if let rp = (res["path"] as? String) ?? path.components(separatedBy: "/mydrive/").last {
-            let enc = Self.encodePath(rp)
-            item.directURL = URL(string: "\(session.host)/proxy/drive/api/v1/file-sharing/links/\(id)/files/\(enc)")
+        //
+        // The trailing segment is the resource NAME, not the drive-qualified path. Sending
+        // `/mydrive/Public/x.txt` here returns 403 ErrForbidden; `x.txt` returns the bytes.
+        // Verified against the console: qualified -> 403, basename -> 200.
+        if let rp = res["path"] as? String ?? path.components(separatedBy: "/").last {
+            item.directURL = directLink(id: id, name: rp)
         }
         return item
     }
@@ -190,7 +193,7 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
             progress: 1
         )
         if let rp = res["path"] as? String {
-            item.directURL = URL(string: "\(session.host)/proxy/drive/api/v1/file-sharing/links/\(id)/files/\(Self.encodePath(rp))")
+            item.directURL = directLink(id: id, name: rp)
         }
         return item
     }
@@ -247,6 +250,13 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
             delay = min(delay * 2, 2_000_000_000)
         }
         return false
+    }
+
+    /// `GET /file-sharing/links/{id}/files/{resourceName}` — owner-side direct download.
+    /// `resourceName` is the file's name; the drive-qualified path is rejected with 403.
+    func directLink(id: String, name: String) -> URL? {
+        let base = name.components(separatedBy: "/").filter { !$0.isEmpty }.last ?? name
+        return URL(string: "\(session.host)/proxy/drive/api/v1/file-sharing/links/\(id)/files/\(Self.encodePath(base))")
     }
 
     static func normalizeDir(_ f: String) -> String {

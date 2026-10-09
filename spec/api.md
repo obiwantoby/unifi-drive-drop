@@ -45,6 +45,8 @@ explains them.
 | C18 | A UniFi OS API key cannot authorize Drive file operations | [3.5](#35-api-keys) |
 | C19 | A second link on the same path returns 403 `ErrForbidden`, not the existing link | [9.2](#92-create) |
 | C20 | Unknown paths fall back to the portal HTML; use response size to tell "no route" from a handler | [2](#2-base-urls-and-routing) |
+| C21 | The direct-link route takes the resource **name**; the drive-qualified path returns 403 | [9.5](#95-owner-side-direct-link) |
+| C22 | `conflict-handling: overwrite` replaces in place, and an existing share link follows the new bytes | [6.4](#64-conflicts) |
 
 ---
 
@@ -312,9 +314,21 @@ different route family ([§10](#10-other-route-families), Mapped).
 
 ### 6.4 Conflicts
 
-**C10** — uploads never overwrite. Dropping `report.txt` where one exists yields
+**C10** — by default uploads never overwrite. Dropping `report.txt` where one exists yields
 `report (1).txt`, then `report (2).txt`. A successful upload therefore does **not** mean your
 file is at the name you sent; read the name back from the listing when it matters.
+
+**C22** — adding `conflict-handling` (base64 of `overwrite`) to `Upload-Metadata` replaces the
+existing object instead. Verified end to end:
+
+| step | result |
+|---|---|
+| upload `probe.txt` (100 B), then upload the same name with `conflict-handling: overwrite` (250 B) | **one** object, 250 B — no `(1)` sibling |
+| create a share link, then overwrite the file | link still resolves; `resource.size` tracks the new object |
+
+That makes "publish a new build to the same URL" possible without deleting and re-linking.
+It also means an overwrite silently invalidates whatever people already downloaded, so it
+belongs behind an explicit user choice, not a default.
 
 ### 6.5 Paths are identifiers
 
@@ -569,7 +583,21 @@ GET /proxy/drive/api/v1/file-sharing/links/{linkId}/files/{resourcePath}
 ```
 
 Returns the raw bytes, but **C13** — 401 without a session cookie. It is a "copy my own
-direct link" affordance, not something to hand to another person. Two distinct actions:
+direct link" affordance, not something to hand to another person.
+
+**C21** — `{resourcePath}` is the resource **name**, not its drive-qualified path. For a file
+at `/mydrive/Public/probe.txt`:
+
+| `{resourcePath}` sent | Result |
+|---|---|
+| `probe.txt` | 200, correct bytes |
+| `/mydrive/Public/probe.txt` | **403** `{"err":{"msg":"Forbidden","code":"ErrForbidden"}}` |
+| `//mydrive/Public/probe.txt` | 301, then 403 |
+
+This is easy to get wrong because the link object's own `path` field *is* qualified, and
+reusing it looks obviously correct. Take the last path segment.
+
+Two distinct actions:
 
 | Menu item | Value | Works for |
 |---|---|---|
@@ -585,7 +613,10 @@ and how it was extracted: [discovery.md](discovery.md).
 | Family | Use |
 |---|---|
 | `/file-operation/{asyncId}`, `/file-batch-operation`, `/resources/batch-operation` | asynchronous and bulk moves |
-| `/trash`, `/trash-resources/trash/{mydrive,shared/<name>}`, `/trash-resources:{path}` | trash listing and restore |
+| `/trash-resources/trash/{mydrive,shared/<name>}` | **Verified** — lists trashed objects with `deletedAt`, `deletedBy`, `deletedFrom` |
+| `DELETE /trash-resources/trash/{path}` | **Verified** — purges permanently (irreversible) |
+| restore from trash | not found; `POST /resources/batch-operation` accepts `srcDsts` but answers `invalid action permission: action not supported` for `move`, `copy`, `restore`, `rename`, `trash` |
+| `/trash` | `route not found` — the registry entry is not a live route |
 | `/snapshots/…`, `/snapshot-settings/…`, `/snapshot-deletion` | snapshots |
 | `/encryption/passwords`, `/encryption/migration/…`, `/encryption/storage/pools/{poolId}/password` | at-rest encryption |
 | `/systems/storage/…`, `/systems/info`, `/systems/performance/file-operations` | storage administration |
@@ -628,12 +659,23 @@ answers it — each one creates its own fixture and deletes it, per the rule in 
 
 ### Worth doing
 
+### Solved since the first pass
+
+| # | Was | Now |
+|---|---|---|
+| U1 | Does overwrite work? | **Yes** — `conflict-handling: overwrite` replaces in place and the existing share link follows the bytes (C22) |
+| U4a | Where did my deleted file go? | `GET /trash-resources/trash/{mydrive,shared/<name>}/` lists them with `deletedAt` / `deletedBy` |
+| U4b | Can a trashed object be purged? | **Yes** — `DELETE /trash-resources/trash/{path}`, permanently and irreversibly |
+| — | How does the direct-link route address the file? | By **name**, not by qualified path (C21). The old form 403'd; the shipped client was fixed |
+
+### Still worth doing
+
 | # | Question | Why it matters | Test |
 |---|---|---|---|
-| U1 | **Does `conflict-handling: overwrite` work?** | Right now every repeat upload makes `file (1).ext`, `(2)`, `(3)`. For a "publish this build" workflow that is a mess, and there is no way to replace a file without deleting its link first | Upload `x.txt`, upload again with `conflict-handling` metadata, then list: one file or two? |
-| U2 | **Uploading into a shared drive** | Both clients can *read* `/shared/<name>/` but only upload to the personal drive. That is the single biggest functional gap | `POST /files` with `dir` + `shared-drive` metadata for a drive the account can write; verify under `/resources/shared/<name>/` |
-| U3 | **tus resume** | A 20 GB upload over Wi-Fi currently restarts from zero on any hiccup. The protocol supports resuming and the server garbage-collects abandoned sessions, which implies it tracks them | Start an upload, kill it at ~40 %, `GET` the session Location for `Upload-Offset`, PATCH from there |
-| U4 | **Trash: list, restore, empty** | `DELETE` is soft (C11) but the UI has no undo. Users will ask where their files went, and "it is in the trash" needs a route behind it | `GET /trash`, `GET /trash-resources/trash/mydrive`, then look for a restore/DELETE on `/trash-resources:{path}` |
+| U2 | **Uploading into a shared drive** | Both clients can *read* `/shared/<name>/` but only upload to the personal drive. The biggest remaining functional gap | `POST /files` with `dir` + `shared-drive` metadata for a drive the account can write; verify under `/resources/shared/<name>/`. **Writes to a shared folder — confirm which drive is safe first** |
+| U3 | **tus resume** | A 20 GB upload over Wi-Fi restarts from zero on any hiccup | Start an upload, kill it at ~40 %, `GET` the session Location for `Upload-Offset`, PATCH from there |
+| U4c | **Restore from trash** | Purge works but nothing brings a file back, so "Delete" has no undo | `POST /resources/batch-operation` validates `srcDsts` yet rejects every action tried (`move`, `copy`, `restore`, `rename`, `trash`) with `action not supported`. Find the action enum in the bundle rather than guessing again |
+| U4d | **Rename / move** | Same route family; would let the app rename without re-upload | As U4c — the validator reveals required fields one at a time, which is the fastest way to the schema |
 
 ### Worth knowing, cheap to find out
 
