@@ -267,6 +267,44 @@ Task { @MainActor in
                "an empty resource name yields no URL")
     }
 
+    // 10 -- a stuck `.sharing` row must self-heal ---------------------------------------
+    do {
+        let f = ScriptedClient()
+        f.behaviors = [.init(delay: 0, tag: "SERVER")]
+        let m = AppModel(forTesting: f)
+
+        func row(_ id: String, _ path: String, _ phase: UploadPhase) -> ShareItem {
+            ShareItem(id: id, fileId: path, name: id, size: 1, shareURL: nil, directURL: nil,
+                      createdAt: .now, expiresAt: nil, phase: phase, progress: 1)
+        }
+
+        // The bug this guards: the server already has a link for SERVER.txt, but the local
+        // row was left in `.sharing`. The old carry-over re-added every non-ready row, so the
+        // spinner came back on every refresh, forever.
+        m.items = [row("stuck", "/mydrive/SERVER.txt", .sharing),
+                   row("waiting", "/mydrive/NOT_ON_SERVER.txt", .sharing)]
+        await m.refresh()
+
+        expect(!m.items.contains { $0.id == "stuck" },
+               "a .sharing row is dropped once the server has a link for its path",
+               "items = \(m.items.map(\.id))")
+        expect(m.items.contains { $0.id == "waiting" },
+               "a .sharing row with no server link is kept")
+        expect(m.items.contains { $0.id == "SERVER" },
+               "the real server row appears in its place")
+
+        // A transfer in flight must never be dropped, link for that path or not.
+        m.items = [row("up", "/mydrive/SERVER.txt", .uploading(0.4))]
+        await m.refresh()
+        expect(m.items.contains { $0.id == "up" },
+               "an uploading row survives even when a link for that path exists")
+
+        // A failure stays on screen until dismissed, however many refreshes happen.
+        m.items = [row("bad", "/mydrive/SERVER.txt", .failed("boom"))]
+        await m.refresh()
+        expect(m.items.contains { $0.id == "bad" }, "a failed row persists across refreshes")
+    }
+
     print(failures == 0 ? "\nALL RACES PASSED" : "\n\(failures) RACE(S) FAILED")
     exit(failures == 0 ? 0 : 1)
 }

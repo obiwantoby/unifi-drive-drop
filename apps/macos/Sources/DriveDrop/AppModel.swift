@@ -259,15 +259,30 @@ final class AppModel: ObservableObject {
         // usage/items/linksByPath assignments through.
         if let uu = try? await u, gen == refreshGen { usage = uu }
         if let ll = try? await l, gen == refreshGen {
-            // Rows that only exist locally — an upload in flight, or one that failed — are not
-            // in the server's list, so a refresh that replaces `items` wholesale would make
-            // the progress bar vanish mid-transfer. Carry them over.
-            let localOnly = items.filter { $0.phase != .ready }
-            items = localOnly + ll
             // Two links can point at the same path; first one wins deterministically.
-            linksByPath = Dictionary(ll.compactMap { s -> (String, ShareItem)? in
+            let byPath = Dictionary(ll.compactMap { s -> (String, ShareItem)? in
                 s.fileId.isEmpty ? nil : (s.fileId, s)
             }, uniquingKeysWith: { a, _ in a })
+
+            // Rows that only exist locally — an upload in flight, or one that failed — are not
+            // in the server's list, so a refresh that replaces `items` wholesale would make
+            // the progress bar vanish mid-transfer.
+            //
+            // The carry-over used to be unconditional on everything except `.ready`, which made
+            // a single missed transition spin forever: the placeholder reappeared on every
+            // refresh while the real link sat in `ll` beside it. Each phase now has its own
+            // rule, and `.sharing` in particular is dropped the moment the server has a link for
+            // that path, so the list self-heals instead of needing a relaunch.
+            let localOnly = items.filter { row in
+                switch row.phase {
+                case .ready:                  return false
+                case .failed:                 return true   // stays until dismissed
+                case .sharing:                return byPath[row.fileId] == nil
+                case .queued, .uploading, .finalizing: return true
+                }
+            }
+            items = localOnly + ll
+            linksByPath = byPath
         }
         do {
             let ee = try await e
@@ -467,19 +482,31 @@ final class AppModel: ObservableObject {
         // before the bar moves visibly, and "is it doing anything?" should never be a question.
         status = "Uploading \(url.lastPathComponent)…"
 
-        let box = ProgressBox()
+        let box = UploadBox()
         let pendingID = item.id
         let watcher = Task { @MainActor in
-            for await p in box.stream {
-                if let i = items.firstIndex(where: { $0.id == pendingID }) {
+            for await sig in box.stream {
+                guard let i = items.firstIndex(where: { $0.id == pendingID }) else { continue }
+                switch sig {
+                case .progress(let p):
                     items[i].phase = .uploading(p)
                     items[i].progress = p
+                case .note(let n):
+                    // The client knows which phase has no byte count; the view should not
+                    // have to guess it from a progress value that has stopped moving.
+                    items[i].phase = .finalizing
+                    status = n
                 }
             }
         }
 
         do {
-            let done = try await client.upload(from: url, to: dir) { p in box.send(p) }
+            // Passing `note` is the whole point: the protocol has a default that swallows it,
+            // so dropping the argument compiles fine and silently loses the only explanation
+            // the user gets during the post-100% finalize wait.
+            let done = try await client.upload(from: url, to: dir,
+                                               progress: { box.send($0) },
+                                               note: { box.note($0) })
             item = done
             if let i = items.firstIndex(where: { $0.id == pendingID }) {
                 items[i] = done
@@ -505,9 +532,12 @@ final class AppModel: ObservableObject {
             toast = "Shared \(shared.name)"
             if copyOnUpload, let u = shared.shareURL { copy(u.absoluteString, label: "Link copied") }
         } catch {
-            if let i = items.firstIndex(where: { $0.localPath == url && !$0.phase.isTerminal }) {
-                items[i].phase = .failed(error.localizedDescription)
-            }
+            // Prefer the placeholder by localPath, but fall back to the id it was inserted
+            // with. If a replacement dropped the localPath this is the only way the row gets
+            // marked, and without it the spinner runs forever.
+            let i = items.firstIndex(where: { $0.localPath == url && !$0.phase.isTerminal })
+                    ?? items.firstIndex(where: { $0.id == pendingID })
+            if let i { items[i].phase = .failed(error.localizedDescription) }
             status = error.localizedDescription
         }
         box.finish()
@@ -587,9 +617,19 @@ final class AppModel: ObservableObject {
 }
 
 /// thread-safe progress fan-out
-private final class ProgressBox: @unchecked Sendable {
-    private let made = AsyncStream<Double>.makeStream()
-    var stream: AsyncStream<Double> { made.stream }
-    func send(_ v: Double) { made.continuation.yield(v) }
+private enum UploadSignal: Sendable {
+    case progress(Double)
+    case note(String)
+}
+
+/// Progress and phase notes travel down **one** stream so their order survives.
+///
+/// Separate streams would let "Finalizing on the console\u{2026}" overtake the final percentage
+/// and then get overwritten by it — the exact confusion this channel exists to remove.
+private final class UploadBox: @unchecked Sendable {
+    private let made = AsyncStream<UploadSignal>.makeStream()
+    var stream: AsyncStream<UploadSignal> { made.stream }
+    func send(_ v: Double) { made.continuation.yield(.progress(v)) }
+    func note(_ s: String) { made.continuation.yield(.note(s)) }
     func finish() { made.continuation.finish() }
 }

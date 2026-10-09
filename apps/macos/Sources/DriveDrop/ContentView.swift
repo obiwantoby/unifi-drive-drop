@@ -423,8 +423,14 @@ struct ShareRow: View {
             if case .uploading(let p) = item.phase {
                 ProgressView(value: p).controlSize(.small).frame(width: 70)
                 Text("\(Int(p * 100))%").font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            } else if item.phase == .finalizing {
+                // Bytes are all sent; the console is still making the object visible. Saying so
+                // beats an unexplained pause at 100%, which reads as a hang.
+                ProgressView().controlSize(.small)
+                Text("Finalizing").font(.caption2).foregroundStyle(.secondary)
             } else if item.phase == .sharing {
                 ProgressView().controlSize(.small)
+                Text("Linking").font(.caption2).foregroundStyle(.secondary)
             } else if case .failed(let msg) = item.phase {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     .help(msg)

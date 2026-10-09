@@ -49,6 +49,10 @@ enum Expiration: Hashable, Identifiable, Codable {
 enum UploadPhase: Hashable {
     case queued
     case uploading(Double)      // 0...1
+    /// Every byte is sent; the console has not made the object visible yet. Kept separate
+    /// from `.uploading(1.0)` because "the bar is stuck at 100%" and "the server is still
+    /// finishing" read differently, and only one of them means something is wrong.
+    case finalizing
     case sharing
     case ready
     case failed(String)
@@ -56,7 +60,7 @@ enum UploadPhase: Hashable {
     var isTerminal: Bool {
         switch self {
         case .ready, .failed: true
-        default: false
+        case .queued, .uploading, .finalizing, .sharing: false
         }
     }
 }
