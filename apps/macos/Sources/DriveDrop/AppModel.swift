@@ -273,22 +273,63 @@ final class AppModel: ObservableObject {
     func goUp() { navigate(to: DrivePath.parent(currentDir)) }
 
     func handleDrop(_ providers: [NSItemProvider]) {
+        // Filter first and say so. Swallowing the whole drop with `try?` meant dropping a
+        // folder, a URL, or text looked exactly like nothing happening.
+        let files = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !files.isEmpty else {
+            status = "That drop had no files in it — folders and links are not accepted."
+            return
+        }
         Task { [weak self] in
             guard let self else { return }
-            for provider in providers {
-                guard let obj = try? await provider.loadItem(
-                    forTypeIdentifier: UTType.fileURL.identifier
-                ) else { continue }
-                let url: URL?
-                switch obj {
-                case let u as URL: url = u
-                case let d as Data: url = URL(dataRepresentation: d, relativeTo: nil)
-                default: url = nil
+            var unread = 0
+            for provider in files {
+                guard let url = await Self.fileURL(from: provider) else { unread += 1; continue }
+                await self.upload(url)
+            }
+            if unread > 0 { self.status = "\(unread) dropped item(s) could not be read." }
+        }
+    }
+
+    /// Resolve a dropped item to a readable file URL.
+    ///
+    /// Three shapes show up in practice and the old code handled only two:
+    ///   * `URL` — a plain drop from Finder
+    ///   * `Data` holding the path — what `loadItem` returns for many sources
+    ///   * a **file promise** — iCloud Drive and sandboxed apps hand back a promise, which is
+    ///     neither, so the drop silently produced nothing
+    /// For promises the file is copied to our own temp location first, because the one
+    /// `loadFileRepresentation` hands us is deleted as soon as its completion returns.
+    private static func fileURL(from provider: NSItemProvider) async -> URL? {
+        if let obj = try? await provider.loadItem(
+            forTypeIdentifier: UTType.fileURL.identifier) {
+            switch obj {
+            case let u as URL where u.isFileURL: return u
+            case let d as Data:
+                if let u = URL(dataRepresentation: d, relativeTo: nil), u.isFileURL { return u }
+            default: break
+            }
+        }
+        // Ask unconditionally: if the provider cannot vend file data the completion just
+        // hands back nil, which is the answer we wanted anyway.
+        return await withCheckedContinuation { cont in
+            _ = provider.loadFileRepresentation(forTypeIdentifier: UTType.data.identifier) { tmp, _ in
+                guard let tmp else { cont.resume(returning: nil); return }
+                let dest = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("drivedrop-\(UUID().uuidString.prefix(8))")
+                    .appendingPathExtension(tmp.pathExtension)
+                do {
+                    try FileManager.default.copyItem(at: tmp, to: dest)
+                    cont.resume(returning: dest)
+                } catch {
+                    // If the copy fails, hand back the original anyway; it may still be live.
+                    cont.resume(returning: tmp)
                 }
-                if let url { await self.upload(url) }
             }
         }
     }
+
+
 
     func upload(_ url: URL) async {
         // Captured now: navigating mid-upload must not retarget an in-flight drop.

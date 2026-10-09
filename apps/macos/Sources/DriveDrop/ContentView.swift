@@ -31,6 +31,13 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 460, minHeight: 420)
+        // Accept the drop anywhere in the window, not only in the dashed box. `.data` is
+        // deliberately omitted from the type list: offering it lets SwiftUI hand back a
+        // provider that only vends bytes, and the file URL then resolves to nothing.
+        .onDrop(of: [.fileURL], isTargeted: $model.isDropTargeted) { providers in
+            model.handleDrop(providers)
+            return true
+        }
         .preferredColorScheme(.dark)
         .animation(.spring(duration: 0.3, bounce: 0.25), value: model.toast)
         .animation(.spring(duration: 0.3, bounce: 0.25), value: model.isDropTargeted)
@@ -135,10 +142,6 @@ struct ContentView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { pickFiles() }
-        .onDrop(of: [.fileURL, .data], isTargeted: $model.isDropTargeted) { providers in
-            model.handleDrop(providers)
-            return true
-        }
     }
 
     // MARK: list
@@ -181,7 +184,7 @@ struct ContentView: View {
     private func menu(for item: ShareItem) -> some View {
         Button("Copy share URL") { model.copy(item.shareURL?.absoluteString ?? "", label: "Link copied") }
             .keyboardShortcut("c")
-            .disabled(item.shareURL == nil)
+            .disabled(item.shareURL == nil || model.usingMock)
         Button("Copy direct download URL") {
             model.copy(item.directURL?.absoluteString ?? item.shareURL?.absoluteString ?? "", label: "Direct link copied")
         }
@@ -419,7 +422,8 @@ struct ShareRow: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(hovering ? Color.primary : Color.secondary)
-                .help("Copy link")
+                .disabled(model.usingMock)
+                .help(model.usingMock ? "Demo data — sign in first" : "Copy link")
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 8)

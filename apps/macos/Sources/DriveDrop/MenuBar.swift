@@ -23,9 +23,18 @@ struct MenuBarContent: View {
         }
     }
 
-    private var recent: [ShareItem] {
-        Array(model.items.prefix(6))
+    /// Links inside the folder the main window is showing.
+    ///
+    /// This used to be `model.items.prefix(6)` — every link on the whole drive — so the menu
+    /// bar disagreed with the window right next to it, and a link copied from the menu bore no
+    /// relation to the folder being browsed.
+    private var shown: [ShareItem] {
+        let prefix = DrivePath.absolutePrefix(model.currentDir)
+        return model.items.filter { $0.fileId == prefix || $0.fileId.hasPrefix(prefix + "/") }
     }
+
+    /// Links elsewhere on the drive, reported so they are not simply hidden.
+    private var elsewhere: Int { model.items.count - shown.count }
 
     var body: some View {
         // Header -------------------------------------------------------------
@@ -33,7 +42,21 @@ struct MenuBarContent: View {
             Image(systemName: "arrow.up.forward.square.fill")
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 1) {
-                Text("DriveDrop").font(.headline)
+                HStack(spacing: 5) {
+                    Text("DriveDrop").font(.headline)
+                    if !model.ready {
+                        Text("LOADING")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    } else if model.usingMock {
+                        Text("DEMO")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(.orange.opacity(0.28), in: Capsule())
+                    }
+                }
+                Text(DrivePath.display(model.currentDir))
+                    .font(.caption2).foregroundStyle(.secondary)
                 if let u = model.usage {
                     Text("\(Fmt.bytes(u.freeBytes)) free of \(Fmt.bytes(u.totalBytes))")
                         .font(.caption2).foregroundStyle(.secondary)
@@ -53,13 +76,15 @@ struct MenuBarContent: View {
 
         Divider()
 
-        // Recent links -------------------------------------------------------
-        if recent.isEmpty {
-            Text("No share links yet")
+        // Links in this folder -----------------------------------------------
+        if shown.isEmpty {
+            Text(model.usingMock
+                 ? "Demo data — sign in to see your links."
+                 : "No share links in this folder yet.")
                 .font(.caption).foregroundStyle(.tertiary)
                 .padding(.horizontal, 10).padding(.vertical, 6)
         } else {
-            ForEach(recent) { item in
+            ForEach(shown) { item in
                 Button {
                     if let s = item.shareURL?.absoluteString { model.copy(s, label: "Link copied") }
                 } label: {
@@ -78,6 +103,12 @@ struct MenuBarContent: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, 10).padding(.vertical, 3)
             }
+        }
+
+        if elsewhere > 0 {
+            Text("\(elsewhere) other link\(elsewhere == 1 ? "" : "s") outside this folder")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .padding(.horizontal, 10).padding(.top, 2)
         }
 
         Divider()

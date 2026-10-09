@@ -5,12 +5,15 @@ import Foundation
 final class MockDriveClient: DriveClient, @unchecked Sendable {
     private let lock = NSLock()
     private var store: [ShareItem] = [
+        // Deliberately NOT the real console host. Demo links that look like
+        // https://192.0.2.10/... get copied into Slack and then fail with no explanation.
+        // .invalid is reserved by RFC 2606 and can never resolve.
         ShareItem(id: "sh_1", fileId: "/mydrive/Public/site-plan.pdf", name: "site-plan.pdf", size: 2_411_724,
-                  shareURL: URL(string: "https://192.0.2.10/proxy/drive/public/8f2c1a9e"),
+                  shareURL: URL(string: "https://demo.invalid/8f2c1a9e"),
                   directURL: nil, createdAt: .now.addingTimeInterval(-7_200),
                   expiresAt: .now.addingTimeInterval(3*86_400), phase: .ready, progress: 1),
         ShareItem(id: "sh_2", fileId: "/mydrive/Public/garage-clip.mov", name: "garage-clip.mov", size: 92_274_688,
-                  shareURL: URL(string: "https://192.0.2.10/proxy/drive/public/1be77d04"),
+                  shareURL: URL(string: "https://demo.invalid/1be77d04"),
                   directURL: nil, createdAt: .now.addingTimeInterval(-86_400),
                   expiresAt: .now.addingTimeInterval(40*60), phase: .ready, progress: 1),
     ]
@@ -52,7 +55,7 @@ final class MockDriveClient: DriveClient, @unchecked Sendable {
         let id = DrivePath.absolutePrefix(folder) + "/" + url.lastPathComponent
         let item = ShareItem(id: "sh_\(UUID().uuidString.prefix(6))", fileId: id,
                              name: url.lastPathComponent, size: size,
-                             shareURL: URL(string: "https://192.0.2.10/proxy/drive/public/\(UUID().uuidString.prefix(8).lowercased())"),
+                             shareURL: URL(string: "https://demo.invalid/\(UUID().uuidString.prefix(8).lowercased())"),
                              directURL: nil, createdAt: .now,
                              expiresAt: Date().addingTimeInterval(604_800),
                              phase: .ready, progress: 1, localPath: url)
