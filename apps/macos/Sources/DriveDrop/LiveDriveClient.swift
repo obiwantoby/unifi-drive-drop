@@ -199,16 +199,36 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
     }
 
     /// VERIFIED: PATCH /proxy/drive/api/v1/file-sharing/links/{id}  (PUT is not a route)
+    /// Change a link's expiry.
+    ///
+    /// `PATCH /file-sharing/links/{id}` **accepts `expiresAt` and ignores it**. Verified
+    /// against the console: 200 with the stored value unchanged for ISO-Z, ISO-offset, epoch
+    /// seconds, epoch millis and `null`, while `accessLimit` on the very same route does
+    /// update. Expiry is set at create only.
+    ///
+    /// So this deletes and recreates. That rotates `token`, which means **the URL already
+    /// handed out stops working** — callers must say so rather than presenting it as an
+    /// in-place edit. The previous implementation PATCHed and then set `expiresAt` on the
+    /// local copy, so the UI showed a new expiry the server had never accepted.
     func setExpiration(_ item: ShareItem, _ expiration: Expiration) async throws -> ShareItem {
-        var body: [String: Any] = [:]
-        if let d = expiration.date { body["expiresAt"] = Self.wire(d) }
-        let data = try JSONSerialization.data(withJSONObject: body)
-        let r = try await session.send("PATCH", "/proxy/drive/api/v1/file-sharing/links/\(item.id)",
-                                       body: data, contentType: "application/json")
-        _ = try requireOK(r, "setExpiration")
-        var out = item
-        out.expiresAt = expiration.date
-        return out
+        let del = try await session.send("DELETE",
+                    "/proxy/drive/api/v1/file-sharing/links/\(item.id)")
+        _ = try requireOK(del, "replace link")
+
+        // The recreate can briefly 403 "duplicated" while the delete propagates.
+        var attempt = 0
+        while true {
+            do {
+                return try await createShare(for: item.fileId, expiration: expiration, password: nil)
+            } catch {
+                attempt += 1
+                if attempt >= 4 {
+                    throw DriveError.decoding("the old link was removed but a new one could not "
+                        + "be created for \u{201c}\(item.name)\u{201d} \u{2014} re-share it manually")
+                }
+                try await Task.sleep(nanoseconds: 300_000_000 * UInt64(attempt))
+            }
+        }
     }
 
     /// VERIFIED: DELETE /proxy/drive/api/v1/file-sharing/links/{id} -> {"data":"OK"}

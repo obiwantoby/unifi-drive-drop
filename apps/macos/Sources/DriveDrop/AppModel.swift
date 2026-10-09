@@ -550,8 +550,20 @@ final class AppModel: ObservableObject {
     func setExpiration(_ item: ShareItem, _ exp: Expiration) async {
         do {
             let updated = try await client.setExpiration(item, exp)
-            if let i = items.firstIndex(where: { $0.id == item.id }) { items[i] = updated }
-            toast = "Expiry set"
+            // Changing expiry recreates the link, so the id and token both change. Matching on
+            // the old id would leave the stale row on screen.
+            if let i = items.firstIndex(where: { $0.fileId == item.fileId }) {
+                items[i] = updated
+            } else {
+                items.removeAll { $0.id == item.id }
+                items.insert(updated, at: 0)
+            }
+            // The URL the user may already have pasted somewhere is now dead. Saying
+            // "Expiry set" would be a lie by omission, and copying silently would be worse.
+            toast = updated.shareURL == item.shareURL
+                ? "Expiry set"
+                : "New link created — the old URL no longer works"
+            if copyOnUpload, let u = updated.shareURL { copy(u.absoluteString, label: "New link copied") }
         } catch { status = error.localizedDescription }
     }
 

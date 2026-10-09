@@ -31,7 +31,7 @@ explains them.
 | C4 | The tus `Location` header is Drive-relative; prefix `/proxy/drive` before PATCH | [8.2](#82-the-contract) |
 | C5 | `Upload-Metadata: checksum` must be the file's real CRC32 | [8.4](#84-checksum) |
 | C6 | tus finalize is asynchronous; poll before creating a share link | [8.6](#86-finalize-is-asynchronous) |
-| C7 | Listing a drive root requires a trailing slash | [6.1](#61-listing) |
+| C7 | A **drive root** needs a trailing slash (`mydrive/`, `shared/<name>/`); subdirectories accept either form | [6.1](#61-listing) |
 | C8 | Valid drive-type path segments are `mydrive` and `shared` only | [6.1](#61-listing) |
 | C9 | `GET /files/<directory>` streams a ZIP and ignores `Range`; never probe it blindly | [7](#7-download) |
 | C10 | Duplicate uploads are auto-renamed `name (1).ext`; re-read the name that landed | [6.4](#64-conflicts) |
@@ -47,6 +47,9 @@ explains them.
 | C20 | Unknown paths fall back to the portal HTML; use response size to tell "no route" from a handler | [2](#2-base-urls-and-routing) |
 | C21 | The direct-link route takes the resource **name**; the drive-qualified path returns 403 | [9.5](#95-owner-side-direct-link) |
 | C22 | `conflict-handling: overwrite` replaces in place, and an existing share link follows the new bytes | [6.4](#64-conflicts) |
+| C23 | `expiresAt` is **create-only**. `PATCH` returns 200 and ignores it; changing expiry rotates the token | [9.3](#93-update-and-delete) |
+| C24 | A share link's `type` accepts only `public` | [9.2](#92-create) |
+| C25 | An unset `expiresAt` comes back as `""`, not `null` | [9.1](#91-read) |
 
 ---
 
@@ -176,7 +179,11 @@ X-Requested-With, X-Token-Expire-Time, X-UidToken, X-Updated-Csrf-Token,
 X-User-Agent, X-Api-Key, X-Ui-Setup-Poll-Token, Authorization
 ```
 
-The clients send `X-Connection-Type: local` and `Origin: https://<console>` on every request.
+**Only the `TOKEN` cookie is required for reads, plus `X-Csrf-Token` for writes.** Verified
+by omission: a `GET` with just the cookie returns 200, and a `POST` with cookie + CSRF but no
+`X-Connection-Type` and no `Origin` also succeeds, while the same `POST` without CSRF gets
+403. The clients still send `X-Connection-Type: local` and `Origin: https://<console>` because
+the UI does, not because they are needed.
 
 ---
 
@@ -507,6 +514,13 @@ resourceLink: "/file-sharing/resource-links/:path"
 | `GET /file-sharing/links` | `{"type":"collection","data":[…]}` |
 | `GET /file-sharing/links/{id}` | single link object |
 
+**C25** — a link with no expiry reports `"expiresAt": ""`, an empty string, not `null` and
+not absent. A strict RFC-3339 parser will throw or treat it as a valid date; treat empty as
+"never".
+
+Links may point at **directories** as well as files — `POST` with a directory path returns a
+normal link and token.
+
 ### 9.2 Create
 
 ```json
@@ -523,6 +537,9 @@ POST /file-sharing/links
 `path` must be **drive-qualified** (`/mydrive/…` or `/shared/<name>/…`). `expiresAt` is
 optional (omit for no expiry); `accessLimit` `0` means unlimited; `password` sets
 `hasPassword: true`.
+
+**C24** — `type` accepts **only** `public`. `internal`, `shared`, `user` and `private` all
+return `400 {"err":{"msg":"invalid request: unknown type"}}`.
 
 Response:
 
@@ -551,8 +568,28 @@ want idempotency.
 
 | Call | Body / result |
 |---|---|
-| `PATCH /file-sharing/links/{id}` | `{"expiresAt": <iso>}`; `null` clears expiry |
+| `PATCH /file-sharing/links/{id}` | updates `accessLimit`. **Ignores `expiresAt`** (C23) |
 | `DELETE /file-sharing/links/{id}` | `{"data":"OK","type":"single"}` |
+| `PUT /file-sharing/links/{id}` | `route not found` |
+
+**C23 — expiration cannot be changed.** `PATCH` answers **200** and leaves the stored value
+untouched. Verified against a link whose `expiresAt` was set, patching to a clearly different
+date: unchanged for `"2027-06-01T00:00:00.000Z"`, for an offset form, for epoch seconds, for
+epoch millis, for `null`, and for the misspellings `expireAt`/`expiredAt`/`expiration`. The
+same route with `{"accessLimit":7}` **does** update, so the route works — the field simply is
+not writable.
+
+The only way to change an expiry is **delete and recreate**, and that generates a **new
+`token`**:
+
+```
+old token  880c8ed3-a83…   →   new token  4680dcb6-787…
+```
+
+So "set expiration" is not an in-place edit; it invalidates every URL already handed out for
+that file. A client that offers it must say so. A client that PATCHes and then updates its
+local model — which the first version of this one did — shows the user a change the server
+never accepted.
 
 ### 9.4 The visitor URL
 
@@ -682,7 +719,7 @@ answers it — each one creates its own fixture and deletes it, per the rule in 
 | # | Question | Why it matters | Test |
 |---|---|---|---|
 | U5 | **Search parameters** | A folder picker over 10k files wants server-side search; today the client lists one directory at a time | `GET /api/v1/search?query=` hangs past 25 s and `POST` is `route not found`. Try `?q=`, `?keyword=`, `?driveId=`, and the `/resources/batch-operation` family. Read the bundle for the call site rather than guessing |
-| U6 | **`accessLimit` enforcement** | The field round-trips, but nobody has confirmed the *Nth* visit is actually refused | Create a link with `accessLimit: 1`, fetch it twice, read `accessedTimes` |
+| U6 | **`accessLimit` enforcement** | `PATCH {"accessLimit":7}` is confirmed writable, but nobody has confirmed the *Nth* visit is actually refused | Create a link with `accessLimit: 1`, fetch it twice, read `accessedTimes` |
 | U7 | **Password-protected links, visitor side** | `password` is accepted on create and `hasPassword` comes back, but the unlock flow is untested, so the app cannot offer it honestly | Drive the visitor page against a link with a password and watch which route `drop.ui.com` calls |
 | U8 | **Do links work with remote access off?** | The spec claims links depend on Ubiquiti cloud enrollment. That is asserted from the share page's hosts, never demonstrated | Toggle remote access on a test console and re-fetch a link. **Do not do this on a console you depend on** |
 
