@@ -103,6 +103,26 @@ impl ShareItem {
     }
 }
 
+/// One row of a folder listing. `path` is drive-qualified (`/mydrive/Public/x.pdf`), which
+/// is also the join key against a share link's `path`.
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: i64,
+    pub modified: Option<DateTime<Utc>>,
+}
+
+impl FileEntry {
+    pub fn display_path(&self) -> String {
+        self.path
+            .trim_start_matches("/mydrive")
+            .trim_start_matches("/shared")
+            .to_string()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Usage {
     pub used_bytes: i64,

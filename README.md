@@ -42,12 +42,14 @@ unifi-drive-drop/
 | **Direct download URL** | ✅ `/file-sharing/links/{id}/files/{resourcePath}` |
 | **Delete a file** | ✅ `DELETE /resources/{path}` → moves to trash |
 | Upload handshake | ✅ tus `201`+`Location`, `204`+`Upload-Offset` |
-| Upload destination | ❓ object does not land — see `spec/api.md` §7 |
-| macOS app | builds, runs; needs re-pointing at the now-known endpoints |
-| Windows app | scaffolded; Windows-only Mica code not yet type-checked |
+| **Upload lands the object** | ✅ the whole thing was `checksum` = real CRC32, plus the `/proxy/drive` prefix on `Location` — see `spec/api.md` §7 |
+| Session lifetime | ✅ `rememberMe: true` → 30-day token, transparent re-login on 401 |
+| macOS app | ✅ complete: menu-bar resident, folder browsing, drag-and-drop with a stated policy for every input shape, drawn app icon |
+| Windows client (library + CLI) | ✅ compiles clean, `cargo test` green, login/usage/browse/links verified live against a real console |
+| Windows GUI (egui + Mica) | ❌ **not written.** The crate ships a library and a terminal client, nothing more |
 
-**The core product loop — list, download, share, expire, delete — is verified working
-against your console.** Only the upload write-path is still open.
+The full loop — browse, upload, share, expire, delete — works on macOS against a real
+console. On Windows the same API port works from a terminal; there is no window yet.
 
 ## Auth: why it uses a password, not the API key
 
@@ -76,8 +78,9 @@ written to disk (`.token`, chmod 600, gitignored).
 
 - The console uses a self-signed cert; clients default to accepting it and warn. Use
   `--verify-tls` / the settings toggle once you have a real cert.
-- macOS stores credentials in the Keychain (`com.drivedrop.session`), Windows in
-  Credential Manager (`drivedrop:192.0.2.10`).
+- macOS stores credentials in the Keychain (`com.drivedrop.session`). The Windows client
+currently takes credentials from the environment; wiring it to Credential Manager is open
+work, and until then do not put `DRIVEDROP_PASS` in a shared shell profile.
 - Never commit `.token` — it is gitignored.
 
 ## Test artefacts

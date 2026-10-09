@@ -4,14 +4,25 @@ version = "0.1.0"
 edition = "2021"
 description = "Drag-and-drop upload + share links for UniFi Drive. Fluent / Mica."
 
+[lib]
+name = "drivedrop"
+path = "src/lib.rs"
+
+# Terminal client. The egui/Fluent front-end is not written yet (see README), so this is
+# what actually exercises the API port on Windows today.
+[[bin]]
+name = "drivedrop"
+path = "src/bin/drivedrop.rs"
+
 [dependencies]
-eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "winit"] }
-egui = "0.31"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-rfd = "0.15"
-arboard = "3"
+
+# Upload-Metadata values are base64; `checksum` is a CRC32 of the file body.
+crc32fast = "1"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
 
 # TLS: rustls only, so this cross-compiles without OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "cookies", "json"] }

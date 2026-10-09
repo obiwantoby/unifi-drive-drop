@@ -233,11 +233,13 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
     /// demand by the upload itself, so no mkdir round-trip is needed for `/Public`.
     /// Normalised so "Public", "Public/" and "/Public/" all mean the same thing.
     static func normalizeDir(_ f: String) -> String {
-        var s = f.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.isEmpty || s == "/" { return "/" }
-        if !s.hasPrefix("/") { s = "/" + s }
-        while s.hasSuffix("/") { s.removeLast() }
-        return s
+        // Rebuild from the non-empty segments: one pass drops a trailing slash, a doubled
+        // slash and a missing leading slash. The server trims none of these for you.
+        let parts = f
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "/")
+            .filter { !$0.isEmpty && $0 != "." }
+        return parts.isEmpty ? "/" : "/" + parts.joined(separator: "/")
     }
 
     func upload(from url: URL, to folder: String,
