@@ -76,11 +76,36 @@ final class AppModel: ObservableObject {
     /// finished launching. That is a deadlocked process with no UI, not a slow one.
     @Published private(set) var ready = false
 
+    /// Bumped whenever the credential set changes. In-flight credential work carrying an
+    /// older epoch is discarded, so a slow Keychain read cannot resurrect a session the user
+    /// just removed, nor overwrite a password they just saved.
+    private var credGen = 0
+
+    /// Bumped on every refresh. Results are dropped unless the epoch is still current —
+    /// overlapping refreshes (upload finishing, navigation, manual retry) otherwise finish in
+    /// arbitrary order and last writer wins on data that has nothing to do with ordering.
+    private var refreshGen = 0
+
+    /// Overlapping refreshes are normal, so this is a counter: a bool would let the first
+    /// finisher hide the spinner while others are still in flight.
+    private var busyCount = 0
+
+    /// The credential store is swappable so the races around it can be driven from a test
+    /// without touching the real Keychain. Production behaviour is unchanged.
+    nonisolated(unsafe) static var keychainRead: @Sendable (String) -> String? = { Keychain.password(for: $0) }
+    nonisolated(unsafe) static var keychainWrite: @Sendable (String, String) -> Void = { Keychain.setPassword($0, for: $1) }
+
     init() {
         tick = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.objectWillChange.send() }
         }
         Task { await bootstrap() }
+    }
+
+    /// Test seam: inject a client and skip the Keychain bootstrap entirely.
+    init(forTesting injected: DriveClient) {
+        client = injected
+        ready = true
     }
 
     /// Re-read the Keychain and rebuild the client.
@@ -91,20 +116,24 @@ final class AppModel: ObservableObject {
 
     /// Keychain writes can block for the same reason reads can, so this stays off-main too.
     func clearSavedPassword() {
+        credGen += 1
+        let gen = credGen
         let h = host
         ready = false
         status = "Removing saved password…"
         Task {
-            await Task.detached(priority: .userInitiated) { Keychain.setPassword("", for: h) }.value
-            applyClient(password: "")
+            await Task.detached(priority: .userInitiated) { Self.keychainWrite("", h) }.value
+            applyClient(password: "", cred: gen)
         }
     }
 
     private func bootstrap() async {
-        status = "Unlocking saved sign-in…"
+        credGen += 1
+        let gen = credGen
         let h = host
+        status = "Unlocking saved sign-in…"
         // Off the main actor, so a Keychain prompt or a slow securityd never stalls launch.
-        let read = Task.detached(priority: .userInitiated) { Keychain.password(for: h) }
+        let read = Task.detached(priority: .userInitiated) { Self.keychainRead(h) }
         // The read can stall indefinitely behind macOS's "app wants to use your
         // confidential information" dialog. Without this the app just looks broken.
         let warn = Task {
@@ -113,10 +142,14 @@ final class AppModel: ObservableObject {
         }
         let pw = await read.value
         warn.cancel()
-        applyClient(password: pw ?? "")
+        applyClient(password: pw ?? "", cred: gen)
     }
 
-    private func applyClient(password: String) {
+    /// `cred` is the credential epoch this work started under. If the user saved or cleared
+    /// credentials while the Keychain call was blocked, applying the stale result would undo
+    /// them — and `ready` would flip back on over their newer intent.
+    private func applyClient(password: String, cred: Int) {
+        guard cred == credGen else { return }
         if username.isEmpty || password.isEmpty {
             client = MockDriveClient()
             status = "Demo data — open Settings and save your console sign-in."
@@ -136,11 +169,13 @@ final class AppModel: ObservableObject {
         username = user
         ready = false
         status = "Saving…"
+        credGen += 1
+        let gen = credGen
         Task {
             if !pass.isEmpty {
-                await Task.detached(priority: .userInitiated) { Keychain.setPassword(pass, for: h) }.value
+                await Task.detached(priority: .userInitiated) { Self.keychainWrite(pass, h) }.value
             }
-            applyClient(password: pass)
+            applyClient(password: pass, cred: gen)
         }
     }
 
@@ -149,18 +184,24 @@ final class AppModel: ObservableObject {
     /// Fetched independently rather than as one `try await (u, l, e)`: an empty or missing
     /// folder must not take the global link list down with it.
     func refresh() async {
-        isBusy = true
-        defer { isBusy = false }
+        busyCount += 1
+        defer { busyCount -= 1; isBusy = busyCount > 0 }
         refreshGen += 1
         let gen = refreshGen
         let dir = DrivePath.canonical(currentDir)
+        // Pin the client: a credential change swaps it mid-flight, and mixing responses from
+        // two different sessions into one snapshot is worse than showing nothing.
+        let c = client
 
-        async let u = client.usage()
-        async let l = client.list()
-        async let e = client.browse(dir)
+        async let u = c.usage()
+        async let l = c.list()
+        async let e = c.browse(dir)
 
-        if let uu = try? await u { usage = uu }
-        if let ll = try? await l {
+        // Every write is guarded. An older refresh that finishes last must not clobber a
+        // newer one's data — checking only at the end (as this used to) still let the stale
+        // usage/items/linksByPath assignments through.
+        if let uu = try? await u, gen == refreshGen { usage = uu }
+        if let ll = try? await l, gen == refreshGen {
             items = ll
             // Two links can point at the same path; first one wins deterministically.
             linksByPath = Dictionary(ll.compactMap { s -> (String, ShareItem)? in
@@ -169,16 +210,13 @@ final class AppModel: ObservableObject {
         }
         do {
             let ee = try await e
-            if DrivePath.canonical(currentDir) == dir { entries = ee }
+            if gen == refreshGen { entries = ee }
         } catch {
-            if DrivePath.canonical(currentDir) == dir { entries = [] }
+            if gen == refreshGen { entries = [] }
         }
-        // Drop results that a navigation already superseded.
         guard gen == refreshGen else { return }
         status = ""
     }
-
-    private var refreshGen = 0
 
     func navigate(to dir: String) {
         let d = DrivePath.canonical(dir)
