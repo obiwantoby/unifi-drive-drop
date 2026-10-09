@@ -138,9 +138,17 @@ final class AppModel: ObservableObject {
     private let store = CredentialStore()
 
     init() {
+        // Nothing in this app polls the console: refreshes happen on launch, on explicit
+        // user action, and after a write. The only recurring work is this tick, which keeps
+        // the "expires in 29d 14h" countdown honest — it touches no network.
         tick = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.objectWillChange.send() }
         }
+        // Let the OS slide the wake by up to a full interval so it can be coalesced with
+        // other work. Without a tolerance the system must wake this process at an exact
+        // minute boundary forever, which is the difference between a menu-bar utility and a
+        // battery drain. The countdown it feeds is minute-granular, so nothing notices.
+        tick?.tolerance = 60
         Task { await bootstrap() }
     }
 
