@@ -129,8 +129,10 @@ struct ContentView: View {
                 .symbolEffect(.bounce, value: model.isDropTargeted)
             Text("Drop files to get a link")
                 .font(.system(.title3, design: .rounded, weight: .semibold))
-            Text("into \(DrivePath.display(model.currentDir)) · click to browse · right-click for options")
-                .font(.caption).foregroundStyle(.secondary)
+            Text(model.inFlight.isEmpty
+                 ? "into \(DrivePath.display(model.currentDir)) · click to browse · right-click for options"
+                 : "\(model.inFlight.count) upload\(model.inFlight.count == 1 ? "" : "s") in progress…")
+                .font(.caption).foregroundStyle(model.inFlight.isEmpty ? Color.secondary : Color.accentColor)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 30)
@@ -157,6 +159,13 @@ struct ContentView: View {
                     }
                     .padding(.top, 24)
                 } else if model.scope == .folder {
+                    // In-flight uploads are not in the server listing, so they must be drawn
+                    // here or a drop shows no progress at all.
+                    ForEach(model.inFlight) { item in
+                        ShareRow(item: item)
+                            .environmentObject(model)
+                            .contextMenu { menu(for: item) }
+                    }
                     ForEach(model.entries) { entry in
                         EntryRow(entry: entry, link: model.link(for: entry.path))
                             .environmentObject(model)

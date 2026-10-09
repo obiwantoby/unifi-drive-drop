@@ -204,6 +204,9 @@ Task { @MainActor in
         expect(survived, "uploading row is not wiped by a refresh",
                "items = \(m.items.map(\.name))")
         expect(m.items.contains { $0.name == "SERVER" }, "server rows still present after merge")
+        // The folder view renders entries, not items, so it reads inFlight explicitly.
+        expect(m.inFlight.contains { $0.name == "big.mov" },
+               "inFlight exposes the pending row for the folder view")
     }
 
     print(failures == 0 ? "\nALL RACES PASSED" : "\n\(failures) RACE(S) FAILED")

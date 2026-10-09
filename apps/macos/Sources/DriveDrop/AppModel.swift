@@ -38,6 +38,13 @@ final class AppModel: ObservableObject {
     /// Shared or not, one row per file in the folder being shown.
     func link(for path: String) -> ShareItem? { linksByPath[path] }
 
+    /// Uploads in flight, and any that failed.
+    ///
+    /// These live only in `items` — the server listing cannot know about them — so the folder
+    /// view has to render them explicitly. It used not to, which made a drop look like a no-op
+    /// for the whole duration of the transfer.
+    var inFlight: [ShareItem] { items.filter { $0.phase != .ready } }
+
     var canGoUp: Bool { DrivePath.canonical(currentDir) != "/" }
 
     /// When the console TOKEN expires (from X-Token-Expire-Time), if we are live.
@@ -344,6 +351,9 @@ final class AppModel: ObservableObject {
                              shareURL: nil, directURL: nil, createdAt: .now, expiresAt: nil,
                              phase: .uploading(0), progress: 0, localPath: url)
         items.insert(item, at: 0)
+        // Immediate text feedback. A large file can sit in CRC32 + the first few chunks
+        // before the bar moves visibly, and "is it doing anything?" should never be a question.
+        status = "Uploading \(url.lastPathComponent)…"
 
         let box = ProgressBox()
         let pendingID = item.id
@@ -359,13 +369,18 @@ final class AppModel: ObservableObject {
         do {
             let done = try await client.upload(from: url, to: dir) { p in box.send(p) }
             item = done
-            if let i = items.firstIndex(where: { $0.localPath == url && $0.phase.isTerminal == false }) {
+            if let i = items.firstIndex(where: { $0.id == pendingID }) {
+                items[i] = done
+            } else if let i = items.firstIndex(where: { $0.localPath == url && !$0.phase.isTerminal }) {
                 items[i] = done
             } else {
                 items.insert(done, at: 0)
             }
             // then create the share
-            items.removeAll { $0.id == "pending-\(item.id)" }
+            if let i = items.firstIndex(where: { $0.id == done.id }) {
+                items[i].phase = .sharing
+            }
+            status = "Creating link for \(done.name)…"
             let shared = try await client.createShare(for: done.fileId,
                                                       expiration: defaultExpiration,
                                                       password: nil)
@@ -374,6 +389,8 @@ final class AppModel: ObservableObject {
             } else {
                 items.insert(shared, at: 0)
             }
+            status = ""
+            toast = "Shared \(shared.name)"
             if copyOnUpload, let u = shared.shareURL { copy(u.absoluteString, label: "Link copied") }
         } catch {
             if let i = items.firstIndex(where: { $0.localPath == url && !$0.phase.isTerminal }) {
@@ -386,6 +403,9 @@ final class AppModel: ObservableObject {
         // Re-read the folder we actually dropped into, so the new file shows up even if the
         // user moved on in the meantime.
         await refresh()
+        // The server row now exists; drop the local placeholder so it is not shown twice.
+        items.removeAll { $0.localPath == url && $0.phase != .ready && $0.id != "" &&
+                         linksByPath[$0.fileId] != nil }
     }
 
     /// Share a file that is already in Drive but has no link yet.
