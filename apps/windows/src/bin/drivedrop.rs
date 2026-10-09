@@ -147,7 +147,12 @@ fn main() -> ExitCode {
                 .get(2)
                 .and_then(|s| parse_expire(s))
                 .unwrap_or(Expiration::Never);
-            client.set_expiration(&id, e).map(|l| println!("{}", l.share_url.unwrap_or_default()))
+            client.set_expiration(&id, e).map(|l| {
+                // Changing an expiry recreates the link, so the old URL is dead. Someone
+                // reading this in a terminal needs to know before they paste the old one.
+                eprintln!("note: this replaced the link — the previous URL no longer works");
+                println!("{}", l.share_url.unwrap_or_default());
+            })
         }
         "rm" => {
             let raw = args.positional.get(1).cloned()

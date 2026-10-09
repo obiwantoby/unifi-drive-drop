@@ -606,19 +606,38 @@ impl DriveClient for LiveClient {
         Self::link_to_item(&j).ok_or_else(|| DriveError::Decoding("share link response".into()))
     }
 
-    /// `PATCH /file-sharing/links/{id}` with `{"expiresAt": iso}`; null clears it.
+    /// Change a link's expiry.
+    ///
+    /// `PATCH` **accepts `expiresAt` and ignores it** (spec C23): 200 with the stored value
+    /// unchanged for every format tried, while `accessLimit` on the same route does update.
+    /// Expiry is set at create only, so this deletes and recreates — which rotates the token,
+    /// meaning the URL already handed out stops working. The command prints the new one for
+    /// that reason; it is not a cosmetic detail.
     fn set_expiration(&self, link_id: &str, exp: Expiration) -> Result<ShareItem> {
-        let body = match exp.seconds() {
-            Some(secs) => {
-                let when = Utc::now() + Duration::seconds(secs);
-                json!({ "expiresAt": when.to_rfc3339_opts(chrono::SecondsFormat::Millis, true) })
+        let current = self
+            .list_links()?
+            .into_iter()
+            .find(|l| l.id == link_id)
+            .ok_or_else(|| DriveError::NotFound(format!("link {link_id}")))?;
+
+        self.delete_link(link_id)?;
+
+        // The recreate can briefly report a duplicate while the delete propagates.
+        let mut last = None;
+        for attempt in 1..=4 {
+            if attempt > 1 {
+                std::thread::sleep(std::time::Duration::from_millis(300 * attempt));
             }
-            None => json!({ "expiresAt": Value::Null }),
-        };
-        let path = format!("/proxy/drive/api/v1/file-sharing/links/{link_id}");
-        let r = self.call("PATCH", &path, Some(&body))?;
-        let j = self.require_ok(&r, "set expiration")?;
-        Self::link_to_item(&j).ok_or_else(|| DriveError::Decoding("expiration response".into()))
+            match self.create_share(&current.file_id, exp, None) {
+                Ok(item) => return Ok(item),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(DriveError::Decoding(format!(
+            "removed the link for {} but could not create a replacement — re-share it manually ({})",
+            current.name,
+            last.map(|e| e.to_string()).unwrap_or_else(|| "no attempt ran".into())
+        )))
     }
 
     fn delete_link(&self, link_id: &str) -> Result<()> {
@@ -760,14 +779,20 @@ impl DriveClient for MockClient {
         self.store.lock().unwrap().push(item.clone());
         Ok(item)
     }
+    /// Mirrors the console: expiry is create-only, so changing it replaces the link and
+    /// rotates both `id` and `share_url`. Mutating in place would let tests pass against a
+    /// behaviour the server does not have.
     fn set_expiration(&self, link_id: &str, exp: Expiration) -> Result<ShareItem> {
-        let mut store = self.store.lock().unwrap();
-        let item = store
-            .iter_mut()
-            .find(|i| i.id == link_id)
-            .ok_or(DriveError::NotAuthenticated)?;
-        item.expires_at = exp.seconds().map(|s| Utc::now() + Duration::seconds(s));
-        Ok(item.clone())
+        let current = {
+            let store = self.store.lock().unwrap();
+            store
+                .iter()
+                .find(|i| i.id == link_id)
+                .cloned()
+                .ok_or(DriveError::NotFound(format!("link {link_id}")))?
+        };
+        self.delete_link(link_id)?;
+        self.create_share(&current.file_id, exp, None)
     }
     fn delete_link(&self, link_id: &str) -> Result<()> {
         self.store.lock().unwrap().retain(|i| i.id != link_id);
@@ -860,5 +885,40 @@ mod tests {
     fn share_urls_point_at_drop_ui_not_the_console() {
         // A pasted link must never look like it points at a LAN address.
         assert_eq!(SHARE_WEB_BASE, "https://drop.ui.com");
+    }
+
+    #[test]
+    fn changing_expiry_replaces_the_link_and_rotates_the_url() {
+        // Spec C23: PATCH ignores expiresAt, so the only way is delete + recreate, and that
+        // mints a new token. The mock has to behave that way or tests written against it
+        // describe a server that does not exist.
+        let c = MockClient::new();
+        let first = c
+            .create_share("/mydrive/report.pdf", Expiration::Never, None)
+            .unwrap();
+        let updated = c.set_expiration(&first.id, Expiration::OneDay).unwrap();
+
+        assert_ne!(updated.id, first.id, "recreating must change the link id");
+        assert_ne!(
+            updated.share_url, first.share_url,
+            "a new link must not reuse the old token"
+        );
+        assert!(updated.expires_at.is_some(), "the new expiry must be set");
+        assert_eq!(updated.file_id, first.file_id, "same file, new link");
+
+        // The old link is gone, not merely edited. MockClient::new() seeds demo links, so
+        // scope the check to the file under test rather than the whole store.
+        let for_file: Vec<_> = c
+            .list_links()
+            .unwrap()
+            .iter()
+            .filter(|l| l.file_id == first.file_id)
+            .map(|l| l.id.clone())
+            .collect();
+        assert!(!for_file.contains(&first.id), "the superseded link must be deleted");
+        assert_eq!(for_file, vec![updated.id.clone()], "exactly one live link per file");
+
+        // And targeting a link that no longer exists is an error, not a silent no-op.
+        assert!(c.set_expiration(&first.id, Expiration::OneHour).is_err());
     }
 }

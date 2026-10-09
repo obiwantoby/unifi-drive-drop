@@ -10,6 +10,23 @@ copy the URL, open it, set an expiration, or delete it.
 | **macOS** | Swift 6 + SwiftUI, liquid-glass panel | complete — menu bar, folder browsing, drag-and-drop |
 | **Windows** | Rust library + terminal client | API client works; **no GUI yet** |
 
+## Download
+
+**macOS 14+ (Apple Silicon or Intel)** → **[latest release](https://github.com/***REMOVED***/unifi-drive-drop/releases/latest)**
+— `DriveDrop-<version>.dmg`, with `SHA256SUMS` alongside.
+
+The build is **ad-hoc signed and not notarized** (no Apple Developer ID), so Gatekeeper will
+say *"Apple cannot check it for malicious software"* on first launch. Right-click the app →
+**Open**, or:
+
+```
+xattr -dr com.apple.quarantine /Applications/DriveDrop.app
+```
+
+It lives in the menu bar. Nothing is sent anywhere except your own console.
+
+Windows has no GUI yet — the Rust client is a CLI (`apps/windows`).
+
 ## Screenshots
 
 | Menu-bar popover | Folder view | Right-click actions |
