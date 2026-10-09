@@ -19,6 +19,8 @@ the spec stays readable.
 """
 from __future__ import annotations
 
+import json
+
 import argparse
 import pathlib
 import re
@@ -59,7 +61,23 @@ LOOSE_RULES: list[tuple[re.Pattern, Repl]] = [
     (re.compile(r"(?i)(csrf[_-]?token[\"'\s=:]+)" + UUID), r"\1<REDACTED-CSRF>"),
     # UniFi OS API keys are 32 base62 chars, near the words "api key"
     (re.compile(r"\b[A-Za-z0-9]{32}\b(?=.{0,40}(?i:api[_ -]?key))"), "<REDACTED-API-KEY>"),
+    # passwordRevision is the server-side token epoch. Only the field name matters to the spec.
+    (re.compile(r'(?i)("?password_?revision"?\s*[:=]\s*"?)\d+'), r"\1<REDACTED>"),
 ]
+
+# --- literal PII -------------------------------------------------------------------------
+# The captures are kept because their *shape* is the research. An operator's name, mailbox
+# and SSO handle are not part of any shape. A fixed table rather than a pattern: a generic
+# "looks like an email" rule would eat the example addresses that keep the spec readable.
+# Anyone reusing this repo for their own console edits this list, not the rules.
+# Loaded from tools/pii.json (untracked) so this file can be published without carrying
+# anyone's name, mailbox or SSO handle. Format:
+#   [["whoever you are", "Example User"], ["whoever@example.com", "user@example.com"]]
+# Run this tool after editing it; --check uses the same table.
+PII_FILE = pathlib.Path(__file__).with_name("pii.json")
+PII: list[tuple[str, str]] = []
+if PII_FILE.exists():
+    PII = [(a, b) for a, b in json.loads(PII_FILE.read_text())]
 
 TARGETS = ["spec", "docs", "tools", "apps", "README.md"]
 
@@ -67,7 +85,7 @@ TARGETS = ["spec", "docs", "tools", "apps", "README.md"]
 # and prose.
 DATA_ONLY = {".json", ".jsonl", ".md", ".txt", ".yaml", ".yml"}
 # This file necessarily contains the patterns it hunts for.
-SKIP = {"tools/redact_capture.py"}
+SKIP = {"tools/redact_capture.py", "tools/pii.json"}
 
 SCAN_SUFFIXES = {".md", ".json", ".jsonl", ".py", ".swift", ".rs", ".toml",
                  ".txt", ".sh", ".yaml", ".yml"}
@@ -91,6 +109,10 @@ def scrub(text: str, suffix: str) -> tuple[str, int]:
     for pat, repl in rules:
         out, n = pat.subn(repl, out)
         hits += n
+    for old, new in PII:
+        if old in out:
+            hits += out.count(old)
+            out = out.replace(old, new)
     return out, hits
 
 
@@ -106,6 +128,10 @@ FIXTURES: list[tuple[str, str, list[str]]] = [
     # Fixture values are deliberately synthetic so no real credential lives in this file.
     (".jsonl", "Set-Cookie: TOKEN=eyJFAKEHEADER.eyJFAKEPAYLOAD.FAKESIGNATURE",
      ['TOKEN=<REDACTED-JWT>']),
+    (".jsonl", '{"password_revision":1700000000,"passwordRevision":1700000000}',
+     ['<REDACTED>']),
+    # The PII table itself is exercised in selftest() with a synthetic table; its real values
+    # must never be written into this file.
     (".jsonl", r'{"x-csrf-token":"00000000-0000-4000-8000-000000000000"}',
      ['<REDACTED-CSRF>']),
     (".jsonl", r'"req_headers": {\"x-csrf-token\":\"00000000-0000-4000-8000-000000000000\"}',
@@ -121,6 +147,17 @@ FIXTURES: list[tuple[str, str, list[str]]] = [
 
 
 def selftest() -> int:
+    # Prove the PII mechanism without quoting the table's real values.
+    saved = list(PII)
+    try:
+        PII[:] = [("Ada Quux", "Example User"), ("ada@quux.test", "user@example.com")]
+        probe = '{"fullName":"Ada Quux","email":"ada@quux.test"}'
+        out, n = scrub(probe, ".jsonl")
+        if n != 2 or "Ada Quux" in out or "ada@quux.test" in out:
+            print(f"FAIL pii mechanism: n={n} out={out}")
+    finally:
+        PII[:] = saved
+
     failed = 0
     for i, (suffix, src, expected) in enumerate(FIXTURES):
         out, _ = scrub(src, suffix)

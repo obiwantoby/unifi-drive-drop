@@ -214,7 +214,7 @@ Returns **JSON**, unlike `/files/...` (see §6).
         "size": 117058589, "usage": 0, "quota": 0,
         "mode": 432, "extension": ".zip",
         "birthTime": "...", "modifyTime": "2026-09-12T17:47:51-04:00",
-        "owner": {"id": "...", "fullName": "***REMOVED***", "firstName": "***REMOVED***"},
+        "owner": {"id": "...", "fullName": "Example User", "firstName": "***REMOVED***"},
         "numDirs": 0, "numFiles": 0, "items": null
       }
     ]
@@ -566,7 +566,7 @@ Response `200` with the link wrapped in the standard envelope:
   "accessedTimes": 0,
   "driveId": "0a527470-b749-4630-8f0b-3eb3e568dc02",
   "driveLocked": false,
-  "createdBy": {"id": "...", "username": "***REMOVED***", "fullName": "***REMOVED***"},
+  "createdBy": {"id": "...", "username": "***REMOVED***", "fullName": "Example User"},
   "sharedWith": [],
   "resource": {"name": ".DS_Store", "size": 24580, "isDir": false, "type": "blob", "...": "..."}
 }}

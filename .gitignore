@@ -19,3 +19,6 @@ spec/raw/*.zip
 # python
 __pycache__/
 *.pyc
+
+# operator-specific PII substitutions; keep local, the repo ships the mechanism only
+tools/pii.json
