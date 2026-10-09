@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use drivedrop::api::fold_invisible;
 use drivedrop::models::{DriveError, Expiration};
 use drivedrop::{DriveClient, LiveClient};
 
@@ -108,9 +109,25 @@ fn main() -> ExitCode {
     // Wrapped in a closure so `?` inside the arms returns the inner Result rather than
     // trying to exit main with a DriveError.
     let run = || -> Result<(), DriveError> {
+        // Reuse a cached session. Calling login() once per command is how you discover the
+        // console's login rate limit: AUTHENTICATION_FAILED_LIMIT_REACHED, which looks
+        // exactly like a wrong password to whoever runs the next command.
+        match load_session(&host, &user) {
+            Some((token, csrf, expire)) => {
+                client.restore(&token, &csrf, expire);
+                if let Err(e) = client.usage() {
+                    eprintln!("cached session rejected ({}); signing in again", e.human());
+                    client.login()?;
+                }
+            }
+            None => client.login()?,
+        }
+        if let Some(sess) = client.session() {
+            save_session(&host, &user, &sess);
+        }
+
         match cmd.as_str() {
         "login" => {
-            client.login()?;
             println!("signed in");
             if let Some(exp) = client.token_expire() {
                 let secs = (exp - chrono::Utc::now()).num_seconds();
@@ -133,8 +150,10 @@ fn main() -> ExitCode {
             client.set_expiration(&id, e).map(|l| println!("{}", l.share_url.unwrap_or_default()))
         }
         "rm" => {
-            let p = args.positional.get(1).cloned().unwrap_or_default();
-            client.delete_file(&drivedrop::api::qualified(&p)).map(|_| println!("moved to trash: {p}"))
+            let raw = args.positional.get(1).cloned()
+                .ok_or_else(|| DriveError::Unsupported("rm needs a path".into()))?;
+            let q = resolve(&client, &raw)?;
+            client.delete_file(&q).map(|_| println!("moved to trash: {q}"))
         }
         "rm-link" => {
             let id = args.positional.get(1).cloned().unwrap_or_default();
@@ -147,6 +166,90 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(&e.human()),
+    }
+}
+
+/// Resolve a path the user typed against the server's own listing.
+///
+/// Never rebuild a drive path from a displayed name. macOS names screenshots with U+202F
+/// (narrow no-break space) before "AM"/"PM"; Finder renders it as an ordinary space, so the
+/// path you typed and the path on disk differ by one codepoint and the console answers 404.
+/// The listing's `path` field is the only trustworthy source, so look it up there.
+fn resolve(c: &dyn DriveClient, input: &str) -> Result<String, DriveError> {
+    if input.starts_with("/mydrive") || input.starts_with("/shared") {
+        return Ok(input.to_string());
+    }
+    let trimmed = input.trim_end_matches('/');
+    let (dir, name) = match trimmed.rfind('/') {
+        Some(0) | None => ("/", trimmed),
+        Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
+    };
+    let entries = c.browse(dir)?;
+    if let Some(e) = entries.iter().find(|e| e.name == name) {
+        return Ok(e.path.clone());
+    }
+    let want = fold_invisible(name);
+    if let Some(e) = entries.iter().find(|e| fold_invisible(&e.name) == want) {
+        eprintln!("note: matched {:?} (the name contains spaces you cannot see)", e.name);
+        return Ok(e.path.clone());
+    }
+    let lower = want.to_lowercase();
+    let near: Vec<String> = entries
+        .iter()
+        .filter(|e| fold_invisible(&e.name).to_lowercase().contains(&lower))
+        .take(3)
+        .map(|e| e.path.clone())
+        .collect();
+    let hint = if near.is_empty() { String::new() } else { format!(" — did you mean {}?", near.join(", ")) };
+    Err(DriveError::NotFound(format!("{input:?} in {dir:?}{hint}")))
+}
+
+/// Session cache. One login per command trips `AUTHENTICATION_FAILED_LIMIT_REACHED`, which
+/// is indistinguishable from "wrong password" to whoever runs it next.
+fn cache_file() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".drivedrop").join("session.json")
+}
+
+fn load_session(host: &str, user: &str) -> Option<(String, String, i64)> {
+    let raw = std::fs::read_to_string(cache_file()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if v["host"].as_str()? != host || v["user"].as_str()? != user {
+        return None;
+    }
+    let expire = v["expire"].as_i64()?;
+    // Leave 5 minutes of headroom; a token restored with seconds left just fails mid-call.
+    if expire / 1000 - chrono::Utc::now().timestamp() < 300 {
+        return None;
+    }
+    Some((v["token"].as_str()?.to_string(), v["csrf"].as_str()?.to_string(), expire))
+}
+
+fn save_session(host: &str, user: &str, s: &(String, String, i64)) {
+    let p = cache_file();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let body = serde_json::json!({"host": host, "user": user,
+                                  "token": s.0, "csrf": s.1, "expire": s.2});
+    // This file *is* a live console session, so keep it owner-only where that is expressible.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        // NTFS ignores the mode bits. The file lives under %USERPROFILE%, which is already
+        // per-user; move it to Credential Manager before sharing a machine.
+    }
+    if let Ok(mut f) = opts.open(&p) {
+        use std::io::Write;
+        let _ = f.write_all(body.to_string().as_bytes());
     }
 }
 
@@ -218,11 +321,7 @@ fn run_share(c: &dyn DriveClient, a: &Args) -> Result<(), DriveError> {
     let raw = a.positional.get(1).cloned().ok_or_else(|| {
         DriveError::Unsupported("share needs a path".into())
     })?;
-    let q = if raw.starts_with("/mydrive") || raw.starts_with("/shared") {
-        raw
-    } else {
-        drivedrop::api::qualified(&raw)
-    };
+    let q = resolve(c, &raw)?;
     let link = c.create_share(&q, a.expire, None)?;
     println!("{}", link.share_url.unwrap_or_default());
     Ok(())

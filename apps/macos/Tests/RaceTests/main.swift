@@ -29,7 +29,8 @@ final class ScriptedClient: DriveClient, @unchecked Sendable {
     func browse(_ d: String) async throws -> [FileEntry] { [] }
 
     func upload(from url: URL, to folder: String,
-                progress: @escaping @Sendable (Double) -> Void) async throws -> ShareItem {
+                progress: @escaping @Sendable (Double) -> Void,
+                note: @escaping @Sendable (String) -> Void = { _ in }) async throws -> ShareItem {
         throw DriveError.unsupported("not used in race tests")
     }
     func createShare(for fileId: String, expiration: Expiration,
@@ -60,7 +61,8 @@ final class UniformClient: DriveClient, @unchecked Sendable {
         return []
     }
     func upload(from url: URL, to folder: String,
-                progress: @escaping @Sendable (Double) -> Void) async throws -> ShareItem {
+                progress: @escaping @Sendable (Double) -> Void,
+                note: @escaping @Sendable (String) -> Void = { _ in }) async throws -> ShareItem {
         throw DriveError.unsupported("not used in race tests")
     }
     func createShare(for fileId: String, expiration: Expiration,

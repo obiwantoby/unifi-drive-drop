@@ -232,6 +232,23 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
     /// `dir` is relative to the **personal-drive root** and — verified — is created on
     /// demand by the upload itself, so no mkdir round-trip is needed for `/Public`.
     /// Normalised so "Public", "Public/" and "/Public/" all mean the same thing.
+    /// Poll `GET /resources/<path>` until the object is queryable, or `timeout` elapses.
+    static func waitForObject(_ path: String, session: DriveSession,
+                              timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var delay: UInt64 = 250_000_000          // 0.25 s, backing off to 2 s
+        while Date() < deadline {
+            if let r = try? await session.send("GET",
+                        "/proxy/drive/api/v1/resources\(Self.encodePath(path))"),
+               (200...299).contains(r.status) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: delay)
+            delay = min(delay * 2, 2_000_000_000)
+        }
+        return false
+    }
+
     static func normalizeDir(_ f: String) -> String {
         // Rebuild from the non-empty segments: one pass drops a trailing slash, a doubled
         // slash and a missing leading slash. The server trims none of these for you.
@@ -243,7 +260,8 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
     }
 
     func upload(from url: URL, to folder: String,
-                progress: @escaping @Sendable (Double) -> Void) async throws -> ShareItem {
+                progress: @escaping @Sendable (Double) -> Void,
+                note: @escaping @Sendable (String) -> Void = { _ in }) async throws -> ShareItem {
         // mappedIfSafe keeps a 200 MB file out of RAM, but it fails on anything the kernel
         // will not mmap, so fall back to a plain read instead of erroring out.
         let data: Data
@@ -289,13 +307,16 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
         }
         progress(1)
 
-        // Finalize is asynchronous and silent on failure, so confirm the object exists.
+        // tus finalize is asynchronous: the last PATCH answers 204 but the object is not
+        // queryable yet, and a share link created inside that window fails. Poll instead of
+        // checking once (a single check spuriously fails on a busy console), and say what we
+        // are waiting on — progress is already at 100% here, so silence reads as a hang.
         let target = Self.drivePath(folder: folder, name: url.lastPathComponent)
-        let check = try await session.send("GET",
-                    "/proxy/drive/api/v1/resources\(Self.encodePath(target))")
-        guard (200...299).contains(check.status) else {
-            throw DriveError.status(check.status,
-                "upload finished but \(target) never appeared (finalize rejected the upload)")
+        note("Finalizing on the console\u{2026}")
+        guard await Self.waitForObject(target, session: session, timeout: 60) else {
+            throw DriveError.decoding(
+                "upload finished but \(target) never appeared. A wrong CRC32 checksum looks "
+              + "exactly like this: every chunk is accepted, then finalize discards the file.")
         }
         return ShareItem(id: target, fileId: target, name: url.lastPathComponent, size: size,
                          shareURL: nil, directURL: nil, createdAt: Date(), expiresAt: nil,

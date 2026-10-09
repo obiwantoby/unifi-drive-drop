@@ -21,6 +21,7 @@ use chrono::{DateTime, Duration, Utc};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::cookie::Jar;
 use reqwest::header::HeaderMap;
+use reqwest::Url;
 use serde_json::{json, Value};
 
 use crate::models::*;
@@ -103,6 +104,45 @@ pub fn listing_path(dir: &str) -> String {
     format!("/proxy/drive/api/v1/resources{}", encode_path(&with_slash))
 }
 
+/// Poll `GET /resources/<path>` until the object is queryable or `timeout` elapses.
+pub fn wait_until_visible(base: &str, token: Option<&str>, qualified_path: &str,
+                          accept_invalid_certs: bool, timeout: std::time::Duration) -> bool {
+    let url = format!("{}/proxy/drive/api/v1/resources{}",
+                      base.trim_end_matches('/'), encode_path(qualified_path));
+    let client = Client::builder()
+        .danger_accept_invalid_certs(accept_invalid_certs)
+        .timeout(std::time::Duration::from_secs(20))
+        .build();
+    let Ok(client) = client else { return false };
+    let deadline = std::time::Instant::now() + timeout;
+    let mut delay = std::time::Duration::from_millis(250);
+    while std::time::Instant::now() < deadline {
+        let mut req = client.get(&url).header("X-Connection-Type", "local");
+        if let Some(t) = token {
+            req = req.header("Cookie", format!("TOKEN={t}"));
+        }
+        if let Ok(r) = req.send() {
+            if r.status().is_success() { return true; }
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(std::time::Duration::from_secs(2));
+    }
+    false
+}
+
+/// Fold the spaces a human cannot see. macOS writes screenshot filenames with U+202F
+/// (narrow no-break space) before "AM"/"PM"; Finder renders it as an ordinary space, so a
+/// path typed, pasted or reconstructed from what you can see does not match the real one
+/// and the console answers 404.
+pub fn fold_invisible(s: &str) -> String {
+    s.replace('\u{202F}', " ")
+        .replace('\u{00A0}', " ")
+        .replace('\u{2007}', " ")
+        .replace('\u{FEFF}', "")
+        .trim()
+        .to_string()
+}
+
 fn b64(s: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
 }
@@ -145,6 +185,10 @@ pub struct LiveClient {
     accept_invalid_certs: bool,
     /// Swapped for a fresh jar at every login (trap 1).
     http: Mutex<Arc<Client>>,
+    jar: Mutex<Arc<Jar>>,
+    /// The `TOKEN` value, kept so `drivedrop` can reuse a session instead of logging in on
+    /// every invocation — the console rate-limits logins and will lock an account out.
+    token: Mutex<Option<String>>,
     csrf: Mutex<Option<String>>,
     logged_in: Mutex<bool>,
     /// `X-Token-Expire-Time`, epoch millis.
@@ -176,7 +220,8 @@ impl LiveClient {
         } else {
             format!("https://{}", host.trim_end_matches('/'))
         };
-        let http = Arc::new(Self::build_client(accept_invalid_certs));
+        let jar = Arc::new(Jar::default());
+        let http = Arc::new(Self::build_client(jar.clone(), accept_invalid_certs));
         Self {
             origin: base.clone(),
             base,
@@ -184,16 +229,15 @@ impl LiveClient {
             password: password.to_string(),
             accept_invalid_certs,
             http: Mutex::new(http),
+            jar: Mutex::new(jar),
+            token: Mutex::new(None),
             csrf: Mutex::new(None),
             logged_in: Mutex::new(false),
             token_expire: Mutex::new(None),
         }
     }
 
-    fn build_client(accept_invalid_certs: bool) -> Client {
-        // An empty jar: it only ever sends cookies back to this host, and it starts with
-        // no TOKEN, which is what login requires.
-        let jar = Arc::new(Jar::default());
+    fn build_client(jar: Arc<Jar>, accept_invalid_certs: bool) -> Client {
         Client::builder()
             .cookie_provider(jar)
             .danger_accept_invalid_certs(accept_invalid_certs)
@@ -327,9 +371,12 @@ impl DriveClient for LiveClient {
         // Trap 1: an existing TOKEN cookie makes the gateway answer
         // `403 {"error":{"code":403,"message":"Forbidden"}}`. reqwest exposes no "clear
         // cookies", so replace the whole client — the old jar goes with it.
-        *self.http.lock().unwrap() = Arc::new(Self::build_client(self.accept_invalid_certs));
+        let jar = Arc::new(Jar::default());
+        *self.jar.lock().unwrap() = jar.clone();
+        *self.http.lock().unwrap() = Arc::new(Self::build_client(jar, self.accept_invalid_certs));
         *self.logged_in.lock().unwrap() = false;
         *self.csrf.lock().unwrap() = None;
+        *self.token.lock().unwrap() = None;
 
         let body = json!({
             "username": self.username,
@@ -353,6 +400,16 @@ impl DriveClient for LiveClient {
             return Err(DriveError::Status(r.status, format!("login failed: {msg}")));
         }
         *self.logged_in.lock().unwrap() = true;
+        // Keep the raw cookie so `restore()` can resume this session in a later process.
+        if let Some(v) = r
+            .headers
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|h| h.to_str().ok())
+            .find_map(|h| h.strip_prefix("TOKEN=").and_then(|t| t.split(';').next()))
+        {
+            *self.token.lock().unwrap() = Some(v.to_string());
+        }
         // The CSRF token is a claim inside the TOKEN JWT, so it must come from this same
         // round trip — a value cached from an earlier session will not validate.
         let csrf = r
@@ -491,14 +548,17 @@ impl DriveClient for LiveClient {
         }
         progress(1.0);
 
-        // Confirm the object exists. A wrong checksum looks exactly like success up to here.
+        // tus finalize is asynchronous: the last PATCH answers 204 but the object is not
+        // queryable yet, and a share link created inside that window fails. Poll, and say
+        // so — progress is already at 100%, so an unexplained pause reads as a hang.
         let target = format!("{}/{}", qualified(folder), name);
-        let check_path = format!("/proxy/drive/api/v1/resources{}", encode_path(&target));
-        let check = self.call("GET", &check_path, None)?;
-        if !(200..=299).contains(&check.status) {
+        progress(1.0);
+        if !wait_until_visible(&self.base, self.token.lock().unwrap().as_deref(),
+                               &target, self.accept_invalid_certs, std::time::Duration::from_secs(60))
+        {
             return Err(DriveError::Unsupported(format!(
-                "upload finished but {target} never appeared — finalize rejected it \
-                 (a bad CRC32 looks exactly like this)"
+                "upload finished but {target} never appeared. A wrong CRC32 looks exactly \
+                 like this: every chunk is accepted, then finalize discards the file."
             )));
         }
 
@@ -578,6 +638,31 @@ impl DriveClient for LiveClient {
 }
 
 impl LiveClient {
+    /// The live session, for caching across CLI invocations: `(token, csrf, expire_ms)`.
+    /// The CSRF value is a claim inside the TOKEN JWT, so the pair is only valid together —
+    /// save and restore them as a unit.
+    pub fn session(&self) -> Option<(String, String, i64)> {
+        let t = self.token.lock().unwrap().clone()?;
+        let c = self.csrf.lock().unwrap().clone()?;
+        let e = self.token_expire.lock().unwrap().clone()?;
+        Some((t, c, e))
+    }
+
+    /// Resume a session saved by `session()`. Skips the login round trip, which matters:
+    /// the console rate-limits logins and answers
+    /// `AUTHENTICATION_FAILED_LIMIT_REACHED` if you call one per command.
+    pub fn restore(&self, token: &str, csrf: &str, expire_ms: i64) {
+        let jar = self.jar.lock().unwrap().clone();
+        if let Ok(url) = Url::parse(&self.base) {
+            jar.add_cookie_str(
+                &format!("TOKEN={token}; Path=/; Secure; HttpOnly; SameSite=None"), &url);
+        }
+        *self.token.lock().unwrap() = Some(token.to_string());
+        *self.csrf.lock().unwrap() = Some(csrf.to_string());
+        *self.token_expire.lock().unwrap() = Some(expire_ms);
+        *self.logged_in.lock().unwrap() = true;
+    }
+
     /// When the current token dies, for the menu-bar countdown.
     pub fn token_expire(&self) -> Option<DateTime<Utc>> {
         self.token_expire
@@ -753,6 +838,17 @@ mod tests {
     fn metadata_values_are_base64_and_comma_joined() {
         let m = format!("filename {}", b64("a.txt"));
         assert_eq!(m, "filename YS50eHQ=");
+    }
+
+    #[test]
+    fn invisible_spaces_are_folded_for_matching() {
+        // A macOS screenshot really is named with U+202F before "PM"; Finder shows a normal
+        // space, so a path typed from what you see does not match and DELETE 404s.
+        let real = "Screenshot 2026-10-05 at 3.23.01\u{202f}PM.png";
+        let typed = "Screenshot 2026-10-05 at 3.23.01 PM.png";
+        assert_ne!(real, typed);
+        assert_eq!(fold_invisible(real), fold_invisible(typed));
+        assert_eq!(fold_invisible("a\u{00a0}b"), "a b");
     }
 
     #[test]

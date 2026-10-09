@@ -171,10 +171,22 @@ protocol DriveClient: AnyObject {
     func list() async throws -> [ShareItem]
     /// Contents of one personal-drive folder. `dir` is personal-relative (`/Public`).
     func browse(_ dir: String) async throws -> [FileEntry]
-    func upload(from url: URL, to folder: String, progress: @escaping @Sendable (Double) -> Void) async throws -> ShareItem
+    func upload(from url: URL, to folder: String,
+                progress: @escaping @Sendable (Double) -> Void,
+                note: @escaping @Sendable (String) -> Void) async throws -> ShareItem
     func createShare(for fileId: String, expiration: Expiration, password: String?) async throws -> ShareItem
     func setExpiration(_ item: ShareItem, _ expiration: Expiration) async throws -> ShareItem
     func delete(_ item: ShareItem) async throws
+}
+
+extension DriveClient {
+    /// `note` reports the phases that have no byte count — zipping, and the asynchronous
+    /// finalize after the last chunk. Without it a 2-second server-side pause looks exactly
+    /// like a hung app, which is precisely what it was reported as.
+    func upload(from url: URL, to folder: String,
+                progress: @escaping @Sendable (Double) -> Void) async throws -> ShareItem {
+        try await upload(from: url, to: folder, progress: progress, note: { _ in })
+    }
 }
 
 // MARK: - Formatting

@@ -43,7 +43,8 @@ actor MockDriveClient: DriveClient {
     }
 
     func upload(from url: URL, to folder: String,
-                progress: @escaping @Sendable (Double) -> Void) async throws -> ShareItem {
+                progress: @escaping @Sendable (Double) -> Void,
+                note: @escaping @Sendable (String) -> Void = { _ in }) async throws -> ShareItem {
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
         var p = 0.0

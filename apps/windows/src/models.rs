@@ -138,6 +138,9 @@ impl Usage {
 #[derive(Debug)]
 pub enum DriveError {
     NotAuthenticated,
+    /// The path you named is not on the console. Distinct from `Unsupported`, which reads
+    /// "this console build cannot do that" and sends you debugging the wrong thing.
+    NotFound(String),
     Transport(String),
     Status(u16, String),
     Decoding(String),
@@ -148,6 +151,7 @@ impl DriveError {
     pub fn human(&self) -> String {
         match self {
             DriveError::NotAuthenticated => "Not signed in to the console.".into(),
+            DriveError::NotFound(m) => format!("No such file on the console: {m}"),
             DriveError::Transport(m) => format!("Could not reach the console. {m}"),
             DriveError::Status(c, m) => format!("Console returned {c}: {m}"),
             DriveError::Decoding(m) => format!("Unexpected response from console ({m})."),
