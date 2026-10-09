@@ -1,0 +1,21 @@
+# session + credentials — never commit
+.token
+*.token
+jar.txt
+cookies*.txt
+.env
+
+# build output
+apps/macos/.build/
+apps/macos/build/
+apps/windows/target/
+*.app/
+
+# captured responses are intentional, but not the scratch ones
+spec/raw/*.zip
+/tmp/
+.DS_Store
+
+# python
+__pycache__/
+*.pyc

@@ -1,0 +1,35 @@
+[package]
+name = "drivedrop"
+version = "0.1.0"
+edition = "2021"
+description = "Drag-and-drop upload + share links for UniFi Drive. Fluent / Mica."
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "winit"] }
+egui = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+rfd = "0.15"
+arboard = "3"
+
+# TLS: rustls only, so this cross-compiles without OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "cookies", "json"] }
+
+[dependencies.log]
+version = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Registry",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
