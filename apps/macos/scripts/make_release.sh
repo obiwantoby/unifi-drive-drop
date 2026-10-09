@@ -20,8 +20,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' \
-  build/DriveDrop.app/Contents/Info.plist 2>/dev/null || echo 0.1.0)"
+# Read the version from VERSION, not from a previously built bundle: that ships a new
+# binary under an old version string the moment someone forgets to rebuild first.
+VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 NAME="DriveDrop-$VERSION"
 OUT=dist
 ROOT="$(pwd)"

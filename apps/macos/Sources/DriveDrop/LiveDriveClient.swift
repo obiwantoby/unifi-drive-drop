@@ -253,10 +253,20 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
     }
 
     /// `GET /file-sharing/links/{id}/files/{resourceName}` — owner-side direct download.
-    /// `resourceName` is the file's name; the drive-qualified path is rejected with 403.
+    ///
+    /// `resourceName` is the file's NAME. The console rejects the drive-qualified path with
+    /// `403 ErrForbidden`, which is easy to ship by accident because `link.path` — the field
+    /// you have to hand anyway — *is* qualified. Pure and static so the rule is testable.
+    static func directLinkURL(host: String, id: String, pathOrName: String) -> URL? {
+        // `last ?? pathOrName` was the first attempt and it is wrong: "///" filters to an
+        // empty array, falls back to the raw string, and encodes to a path of slashes.
+        guard let base = pathOrName.components(separatedBy: "/").filter({ !$0.isEmpty }).last
+        else { return nil }
+        return URL(string: "\(host)/proxy/drive/api/v1/file-sharing/links/\(id)/files/\(encodePath(base))")
+    }
+
     func directLink(id: String, name: String) -> URL? {
-        let base = name.components(separatedBy: "/").filter { !$0.isEmpty }.last ?? name
-        return URL(string: "\(session.host)/proxy/drive/api/v1/file-sharing/links/\(id)/files/\(Self.encodePath(base))")
+        Self.directLinkURL(host: session.host, id: id, pathOrName: name)
     }
 
     static func normalizeDir(_ f: String) -> String {

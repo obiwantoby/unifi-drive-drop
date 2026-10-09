@@ -13,6 +13,7 @@ fi
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 CONFIG="${1:-release}"
+VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 APP="build/DriveDrop.app"
 
 swift build -c "$CONFIG"
@@ -44,7 +45,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/DriveDrop"
 cp resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -53,8 +54,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key>              <string>DriveDrop</string>
   <key>CFBundleDisplayName</key>       <string>DriveDrop</string>
   <key>CFBundleIdentifier</key>        <string>com.drivedrop.macos</string>
-  <key>CFBundleVersion</key>           <string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key>           <string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundlePackageType</key>       <string>APPL</string>
   <key>CFBundleExecutable</key>        <string>DriveDrop</string>
   <key>CFBundleIconFile</key>          <string>AppIcon</string>

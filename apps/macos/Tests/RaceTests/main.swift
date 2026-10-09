@@ -245,6 +245,28 @@ Task { @MainActor in
         try? FileManager.default.removeItem(atPath: base)
     }
 
+    // 9 -- direct download URL takes the NAME, not the qualified path ------------------
+    do {
+        let id = "ed4c254d-de8c-4b5a-8d15-5c91584aff23"
+        // The bug: link.path is "/mydrive/Public/probe.txt" and reusing it 403s.
+        let a = LiveDriveClient.directLinkURL(host: "https://10.0.0.5", id: id,
+                                              pathOrName: "/mydrive/Public/probe.txt")
+        expect(a?.lastPathComponent == "probe.txt",
+               "qualified path collapses to the resource name",
+               "\(a?.absoluteString ?? "nil")")
+        let b = LiveDriveClient.directLinkURL(host: "https://10.0.0.5", id: id, pathOrName: "probe.txt")
+        expect(a?.absoluteString == b?.absoluteString,
+               "qualified path and bare name produce the same URL")
+        // Names with spaces must stay percent-encoded in one segment.
+        let c = LiveDriveClient.directLinkURL(host: "https://10.0.0.5", id: id,
+                                              pathOrName: "/mydrive/Public/my report.pdf")
+        expect(c?.absoluteString.hasSuffix("/files/my%20report.pdf") == true,
+               "name is percent-encoded as a single segment",
+               "\(c?.absoluteString ?? "nil")")
+        expect(LiveDriveClient.directLinkURL(host: "https://h", id: id, pathOrName: "///") == nil,
+               "an empty resource name yields no URL")
+    }
+
     print(failures == 0 ? "\nALL RACES PASSED" : "\n\(failures) RACE(S) FAILED")
     exit(failures == 0 ? 0 : 1)
 }
