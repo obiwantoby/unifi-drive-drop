@@ -209,6 +209,40 @@ Task { @MainActor in
                "inFlight exposes the pending row for the folder view")
     }
 
+    // 8 -- drop policy: allow gracefully, or deny with a reason -------------------------
+    do {
+        let base = NSTemporaryDirectory() + "dd-classify-\(UUID().uuidString.prefix(6))"
+        try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+        let good = base + "/good.txt"
+        try "hi".data(using: .utf8)!.write(to: URL(fileURLWithPath: good))
+        FileManager.default.createFile(atPath: base + "/empty.bin", contents: Data())
+        try FileManager.default.createDirectory(atPath: base + "/afolder", withIntermediateDirectories: true)
+        symlink("good.txt", base + "/link.txt")            // dangling-free link
+        symlink("nowhere", base + "/dangling.txt")         // broken link: used to SIGSEGV
+        symlink("loopb.txt", base + "/loopa.txt")
+        symlink("loopa.txt", base + "/loopb.txt")
+        mkfifo((base + "/pipe").cString(using: .utf8), 0o644)
+
+        let cases: [(String, String)] = [
+            ("good.txt", "upload"), ("empty.bin", "upload"), ("link.txt", "upload"),
+            ("dangling.txt", "deny"), ("loopa.txt", "deny"), ("pipe", "deny"),
+            ("afolder", "zip"), ("gone.txt", "deny"),
+        ]
+        var bad: [String] = []
+        for (name, want) in cases {
+            let d = AppModel.classify(URL(fileURLWithPath: base + "/" + name))
+            let got: String
+            switch d {
+            case .upload: got = "upload"
+            case .zip:    got = "zip"
+            case .deny:   got = "deny"
+            }
+            if got != want { bad.append("\(name): got \(got) want \(want)") }
+        }
+        expect(bad.isEmpty, "drop policy classifies every shape correctly", bad.joined(separator: "; "))
+        try? FileManager.default.removeItem(atPath: base)
+    }
+
     print(failures == 0 ? "\nALL RACES PASSED" : "\n\(failures) RACE(S) FAILED")
     exit(failures == 0 ? 0 : 1)
 }

@@ -45,6 +45,10 @@ final class AppModel: ObservableObject {
     /// for the whole duration of the transfer.
     var inFlight: [ShareItem] { items.filter { $0.phase != .ready } }
 
+    /// Only the ones actually moving. `.failed` is terminal, so it must not be counted here —
+    /// a dead row sitting in the list used to keep saying "1 upload in progress" forever.
+    var uploadingCount: Int { items.filter { !$0.phase.isTerminal }.count }
+
     var canGoUp: Bool { DrivePath.canonical(currentDir) != "/" }
 
     /// When the console TOKEN expires (from X-Token-Expire-Time), if we are live.
@@ -284,17 +288,117 @@ final class AppModel: ObservableObject {
         // folder, a URL, or text looked exactly like nothing happening.
         let files = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
         guard !files.isEmpty else {
-            status = "That drop had no files in it — folders and links are not accepted."
+            status = "That drop had no readable items in it."
             return
         }
         Task { [weak self] in
             guard let self else { return }
+            var denied: [String] = []
             var unread = 0
             for provider in files {
                 guard let url = await Self.fileURL(from: provider) else { unread += 1; continue }
-                await self.upload(url)
+                switch Self.classify(url) {
+                case .upload(let target):
+                    await self.upload(target)
+                case .zip(let dir):
+                    self.status = "Zipping \(dir.lastPathComponent)…"
+                    if let zip = await Self.zip(dir) {
+                        await self.upload(zip)
+                        try? FileManager.default.removeItem(at: zip)
+                    } else {
+                        denied.append("\u{201c}\(dir.lastPathComponent)\u{201d} could not be zipped")
+                    }
+                case .deny(let reason):
+                    denied.append(reason)
+                }
             }
-            if unread > 0 { self.status = "\(unread) dropped item(s) could not be read." }
+            if !denied.isEmpty {
+                self.status = denied.joined(separator: " ")
+            } else if unread > 0 {
+                self.status = "\(unread) dropped item(s) could not be read."
+            }
+        }
+    }
+
+    enum DropDecision: Equatable {
+        case upload(URL)
+        case zip(URL)
+        case deny(String)
+    }
+
+    /// Decide what to do with one dropped path. Every rejection names the item and the
+    /// reason — "it failed" is what made this unusable: an .app bundle produced a yellow
+    /// triangle and "96 bytes", which told you nothing.
+    ///
+    /// Measured behaviour that drove these rules (`Data(contentsOf:)` result):
+    ///   regular file     reads
+    ///   0-byte file      reads, 0 B            -> allowed; the console accepts it
+    ///   symlink -> file  **throws**            -> must resolve first; this was a real bug
+    ///   broken symlink   throws               -> deny with a reason
+    ///   directory        throws               -> zip it
+    ///   unreadable file  throws               -> deny with a reason
+    ///   fifo / socket    throws               -> deny; reading one would block forever
+    nonisolated static func classify(_ url: URL) -> DropDecision { classify(url, depth: 0) }
+
+    /// `URL.resolvingSymlinksInPath()` **segfaults** on a dangling symlink, so links are
+    /// walked with `readlink` and a hard depth limit instead.
+    nonisolated static func classify(_ url: URL, depth: Int) -> DropDecision {
+        let name = url.lastPathComponent
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else {
+            return .deny("\u{201c}\(name)\u{201d} no longer exists.")
+        }
+        switch st.st_mode & S_IFMT {
+        case S_IFLNK:
+            guard depth < 8 else {
+                return .deny("\u{201c}\(name)\u{201d} is an alias chain that never resolves.")
+            }
+            var buf = [CChar](repeating: 0, count: 4096)
+            let n = readlink(url.path, &buf, buf.count - 1)
+            guard n > 0 else {
+                return .deny("\u{201c}\(name)\u{201d} is an alias that cannot be read.")
+            }
+            buf[Int(n)] = 0
+            let dest = String(cString: buf)
+            let target = dest.hasPrefix("/")
+                ? URL(fileURLWithPath: dest)
+                : url.deletingLastPathComponent().appendingPathComponent(dest)
+            var tst = stat()
+            guard lstat(target.path, &tst) == 0 else {
+                return .deny("\u{201c}\(name)\u{201d} is an alias to something that is not there.")
+            }
+            return classify(target, depth: depth + 1)
+        case S_IFDIR:
+            return .zip(url)
+        case S_IFREG:
+            guard access(url.path, R_OK) == 0 else {
+                return .deny("\u{201c}\(name)\u{201d} is not readable \u{2014} check its permissions.")
+            }
+            return .upload(url)
+        default:
+            return .deny("\u{201c}\(name)\u{201d} is a pipe, socket or device, not a file.")
+        }
+    }
+
+    /// Zip a directory into a temp file and return it. `ditto -c -k --sequesterRsrc` is the
+    /// macOS-native archiver: it preserves resource forks, symlinks, permissions and the
+    /// code-signature layout that Info-ZIP would flatten — which is exactly what makes an
+    /// unzipped .app still launchable.
+    static func zip(_ dir: URL) async -> URL? {
+        let base = dir.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "/", with: "_")
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(base)-\(UUID().uuidString.prefix(6)).zip")
+        return await withCheckedContinuation { cont in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            p.arguments = ["-c", "-k", "--sequesterRsrc", dir.path, dest.path]
+            p.terminationHandler = { proc in
+                let ok = proc.terminationStatus == 0
+                    && FileManager.default.fileExists(atPath: dest.path)
+                cont.resume(returning: ok ? dest : nil)
+            }
+            do { try p.run() } catch { cont.resume(returning: nil) }
         }
     }
 
@@ -427,6 +531,12 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(for: .seconds(1.8))
             if toast == label { toast = nil }
         }
+    }
+
+    /// Drop a failed row out of the list without retrying it.
+    func dismiss(_ item: ShareItem) {
+        items.removeAll { $0.id == item.id }
+        if uploadingCount == 0 { status = "" }
     }
 
     func setExpiration(_ item: ShareItem, _ exp: Expiration) async {

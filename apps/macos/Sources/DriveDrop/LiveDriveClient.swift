@@ -242,7 +242,11 @@ final class LiveDriveClient: DriveClient, @unchecked Sendable {
 
     func upload(from url: URL, to folder: String,
                 progress: @escaping @Sendable (Double) -> Void) async throws -> ShareItem {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        // mappedIfSafe keeps a 200 MB file out of RAM, but it fails on anything the kernel
+        // will not mmap, so fall back to a plain read instead of erroring out.
+        let data: Data
+        do { data = try Data(contentsOf: url, options: .mappedIfSafe) }
+        catch { data = try Data(contentsOf: url) }
         let size = Int64(data.count)
         let dir = Self.normalizeDir(folder)
 
