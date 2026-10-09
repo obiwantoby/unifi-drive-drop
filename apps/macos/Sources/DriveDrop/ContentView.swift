@@ -226,6 +226,9 @@ struct ContentView: View {
 
         if case .failed = item.phase {
             Button("Retry upload") { Task { await model.retry(item) } }
+            // A failed row may never have reached the server, so "Delete" can be meaningless.
+            // Dismiss drops the local row and stops it cluttering the list.
+            Button("Dismiss") { model.dismiss(item) }
         }
         Button("Delete", role: .destructive) { model.pendingDelete = item }
             .keyboardShortcut(.delete, modifiers: .command)

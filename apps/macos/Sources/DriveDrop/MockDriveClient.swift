@@ -2,8 +2,10 @@ import Foundation
 
 /// Offline stand-in so the UI is fully usable before the console payloads are pinned down.
 /// Selected automatically when no credentials are configured.
-final class MockDriveClient: DriveClient, @unchecked Sendable {
-    private let lock = NSLock()
+/// An actor rather than a lock-guarded class: every DriveClient method is already `async`,
+/// so isolation is free, and `NSLock.lock()` is unavailable from async contexts (a warning
+/// today, a hard error in Swift 6).
+actor MockDriveClient: DriveClient {
     private var store: [ShareItem] = [
         // Deliberately NOT the real console host. Demo links that look like
         // https://192.0.2.10/... get copied into Slack and then fail with no explanation.
@@ -23,7 +25,6 @@ final class MockDriveClient: DriveClient, @unchecked Sendable {
     func usage() async throws -> Usage { Usage(usedBytes: 3_724_542_208, totalBytes: 15_999_766_528) }
 
     func list() async throws -> [ShareItem] {
-        lock.lock(); defer { lock.unlock() }
         return store
     }
 
@@ -35,7 +36,7 @@ final class MockDriveClient: DriveClient, @unchecked Sendable {
             return [FileEntry(path: "/mydrive/Public", name: "Public", size: 0, isDir: true, modifyTime: .now)]
         }
         guard d == "/Public" else { return [] }
-        lock.lock(); let items = store; lock.unlock()
+        let items = store
         return items.map {
             FileEntry(path: $0.fileId, name: $0.name, size: $0.size, isDir: false, modifyTime: $0.createdAt)
         }
@@ -59,13 +60,12 @@ final class MockDriveClient: DriveClient, @unchecked Sendable {
                              directURL: nil, createdAt: .now,
                              expiresAt: Date().addingTimeInterval(604_800),
                              phase: .ready, progress: 1, localPath: url)
-        lock.lock(); store.insert(item, at: 0); lock.unlock()
+        store.insert(item, at: 0)
         return item
     }
 
     func createShare(for fileId: String, expiration: Expiration, password: String?) async throws -> ShareItem {
         try await Task.sleep(for: .milliseconds(200))
-        lock.lock(); defer { lock.unlock() }
         guard let i = store.firstIndex(where: { $0.fileId == fileId }) else {
             throw DriveError.transport("unknown file \(fileId)")
         }
@@ -75,7 +75,6 @@ final class MockDriveClient: DriveClient, @unchecked Sendable {
 
     func setExpiration(_ item: ShareItem, _ expiration: Expiration) async throws -> ShareItem {
         try await Task.sleep(for: .milliseconds(150))
-        lock.lock(); defer { lock.unlock() }
         guard let i = store.firstIndex(where: { $0.id == item.id }) else { return item }
         store[i].expiresAt = expiration.date
         return store[i]
@@ -83,7 +82,6 @@ final class MockDriveClient: DriveClient, @unchecked Sendable {
 
     func delete(_ item: ShareItem) async throws {
         try await Task.sleep(for: .milliseconds(150))
-        lock.lock(); defer { lock.unlock() }
         store.removeAll { $0.id == item.id }
     }
 }

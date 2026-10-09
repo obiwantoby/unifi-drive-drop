@@ -30,9 +30,19 @@ done
 [[ -n "$BIN" ]] || { echo "error: built binary not found under .build" >&2; exit 1; }
 echo "binary: $BIN"
 
+# Icon: rendered from scripts/make_icon.swift, cached in resources/. Rebuilt automatically
+# if missing so a fresh clone still produces a branded bundle.
+if [[ ! -f resources/AppIcon.icns ]]; then
+  echo "rendering app icon…"
+  mkdir -p resources
+  swift scripts/make_icon.swift resources/AppIcon.iconset >/dev/null
+  iconutil -c icns resources/AppIcon.iconset -o resources/AppIcon.icns
+fi
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/DriveDrop"
+cp resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -47,6 +57,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundlePackageType</key>       <string>APPL</string>
   <key>CFBundleExecutable</key>        <string>DriveDrop</string>
+  <key>CFBundleIconFile</key>          <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>    <string>14.0</string>
   <key>NSHighResolutionCapable</key>   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
