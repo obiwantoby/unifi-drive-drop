@@ -8,7 +8,7 @@ copy the URL, open it, set an expiration, or delete it.
 | Platform | Stack | State |
 |---|---|---|
 | **macOS** | Swift 6 + SwiftUI, liquid-glass panel | complete — menu bar, folder browsing, drag-and-drop |
-| **Windows** | Rust library + terminal client | API client works; **no GUI yet** |
+| **Windows** | Rust + Slint (Fluent 2) + acrylic, plus a terminal client | runs on Windows 11: tray-resident, folder browsing, upload, share |
 
 ## Download
 
@@ -25,7 +25,9 @@ xattr -dr com.apple.quarantine /Applications/DriveDrop.app
 
 It lives in the menu bar. Nothing is sent anywhere except your own console.
 
-Windows has no GUI yet — the Rust client is a CLI (`apps/windows`).
+Windows builds from source in one `cargo build` (below), or takes the binary from the latest
+Actions run. It sits in the notification area; closing the window hides it, **Quit** is in the tray
+menu. The Rust CLI (`apps/windows`) is still there for scripting.
 
 ## Screenshots
 
@@ -71,10 +73,11 @@ unifi-drive-drop/
 | Session lifetime | ✅ `rememberMe: true` → 30-day token, transparent re-login on 401 |
 | macOS app | ✅ complete: menu-bar resident, folder browsing, drag-and-drop with a stated policy for every input shape, drawn app icon |
 | Windows client (library + CLI) | ✅ compiles clean, `cargo test` green, login/usage/browse/links verified live against a real console |
-| Windows GUI (egui + Mica) | ❌ **not written.** The crate ships a library and a terminal client, nothing more |
+| Windows GUI (Slint + acrylic) | ✅ **runs on Windows 11** — tray icon, tooltip, menu, close-to-tray, folder-scoped links, light/dark, generated icon, all confirmed on the machine rather than in CI |
 
 The full loop — browse, upload, share, expire, delete — works on macOS against a real
-console. On Windows the same API port works from a terminal; there is no window yet.
+console, and the Windows window has been driven against one too (sign-in, usage, link listing).
+Drag-and-drop onto the window and the credential store are still macOS-only.
 
 ## Building on Windows
 
@@ -99,11 +102,13 @@ Two things worth knowing before you judge the text:
 - **Renderer.** `cargo build --release --features skia` swaps femtovg for Skia's font rasteriser.
   Slint draws glyphs itself — ClearType and DirectWrite are not in the path — so this is the lever
   for text clarity. Build both and keep whichever reads better on your display.
-- **Mica.** The backdrop is requested through `window-vibrancy`, and the exe declares
-  `PerMonitorV2` DPI awareness in its embedded manifest so Windows does not bitmap-stretch it on a
-  scaled display. Whether Mica actually shows behind a Slint surface is an open question: Slint
-  1.18 exposes no window-transparency API, and the app paints its own background, so the honest
-  expectation is *title-bar tint at best*.
+- **Acrylic.** The backdrop is acrylic (`window-vibrancy`), falling back to Mica and then to a
+  painted surface, and the palette only goes translucent when one of them actually applied — so a
+  machine where the call fails shows a solid window instead of a ghost. The exe declares
+  `PerMonitorV2` DPI awareness in its embedded manifest, so a scaled display gets a sharp window
+  rather than a bitmap stretch. `DRIVEDROP_NO_ACRYLIC=1` runs the whole UI on the painted surface.
+
+The window follows the OS light/dark setting, including a live switch while it is open.
 
 CI builds both binaries on `windows-latest` on every push and uploads them as artifacts, so you can
 download `drivedrop-ui.exe` from the Actions run instead of installing a toolchain.

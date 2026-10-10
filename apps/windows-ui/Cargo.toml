@@ -15,7 +15,10 @@ drivedrop = { path = "../windows" }
 #
 # raw-window-handle-06 is not on by default, and without it Slint exposes no way to reach the
 # HWND, which is what window-vibrancy needs.
-slint = { version = "1", features = ["raw-window-handle-06"] }
+# `system-tray` pulls in Slint's own tray backend (tray-icon on Windows) so the tray is declared
+# in main.slint rather than wired by hand; `raw-window-handle-06` is what window-vibrancy needs to
+# reach the HWND, and is not on by default.
+slint = { version = "1", features = ["raw-window-handle-06", "system-tray"] }
 
 # Windows 11 Mica backdrop. Called on every platform rather than behind `cfg(windows)` so macOS
 # type-checks the exact expression that runs on Windows; off Windows it returns `Unsupported`.
@@ -29,6 +32,10 @@ arboard = "3"
 
 # Expiry maths and the "expires 12 Jun, 14:05" formatting.
 chrono = "0.4"
+
+# Windows only: the registry read behind the light/dark palette. Same pin as the API crate.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Registry"] }
 
 [features]
 # Text clarity, Windows. Slint rasterises glyphs itself — neither ClearType (a GDI subpixel

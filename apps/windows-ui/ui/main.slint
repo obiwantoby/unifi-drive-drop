@@ -29,17 +29,46 @@ export component App inherits Window {
     min-width: 420px;
     min-height: 520px;
     default-font-size: 14px;
+    icon: @image-url("../icons/app-64.png");
 
-    // Palette. Fluent's dark surface ramp; the accent is left to the system where the style
-    // provides one, and only these neutral layers are painted by us.
-    property <color> surface:  #1b1b1b;
-    property <color> card:     #272727;
-    property <color> card-hi:  #2f2f2f;
-    property <color> stroke:   #383838;
-    property <color> fg:       #ffffff;
-    property <color> fg-2:     #c7c7c7;
-    property <color> fg-3:     #9a9a9a;
-    property <color> accent:   #4cc2ff;
+    in property <bool> dark: true;
+
+    // The scheme this file paints in, set from Rust (registry AppsUseLightTheme). The first
+    // Windows run shipped a dark palette on a light system and every Text here went
+    // white-on-white while the Fluent controls beside them stayed correctly light.
+    //
+    // The controls follow the OS by themselves, so this property is only ever trying to agree
+    // with them — there is no supported way to drive the style's scheme from here (`Palette` is a
+    // read-only global in 1.18: neither instantiating it nor assigning to it parses). The 2 s
+    // poll in main.rs is what keeps the two in step through a live theme switch.
+
+    // The window brush doubles as the transparency request: Slint asks the backend for a surface
+    // with alpha only when this colour is not opaque. `backdrop` is set from Rust once a real
+    // DWM backdrop has been confirmed, so a machine where that call fails keeps a solid surface
+    // instead of a ghost.
+    background: root.surface;
+
+    // True when acrylic (or Mica) is actually compositing behind this window.
+    in property <bool> backdrop: false;
+
+    // Palette. Both schemes are tuned against a blurred wallpaper rather than a flat colour: the
+    // surface keeps enough transparency for the acrylic to read, so the text tones have to be the
+    // ends of their ramps, not mid-greys. `fg` on `surface` is >12:1 either way; `fg-3`, the
+    // weakest tone used for captions, stays above 4.5:1.
+    property <color> surface:  root.backdrop ? (root.dark ? #1b1b1bb8 : #f3f3f3c4)
+                                             : (root.dark ? #1b1b1b    : #f3f3f3);
+    property <color> card:     root.backdrop ? (root.dark ? #ffffff14 : #ffffffcc)
+                                             : (root.dark ? #272727    : #ffffff);
+    property <color> card-hi:  root.backdrop ? (root.dark ? #ffffff24 : #ffffffee)
+                                             : (root.dark ? #2f2f2f    : #e8e8e8);
+    property <color> stroke:   root.dark ? #ffffff2b : #00000026;
+    property <color> fg:       root.dark ? #ffffff : #1b1b1b;
+    property <color> fg-2:     root.dark ? #cfcfcf : #3d3d3d;
+    property <color> fg-3:     root.dark ? #a8a8a8 : #5c5c5c;
+    property <color> accent:   root.dark ? #4cc2ff : #005fb8;
+    // Glyph on the accent tile and the DEMO badge: both have to survive a flip of the scheme.
+    property <color> on-accent: root.dark ? #0a0a0a : #ffffff;
+    property <color> demo-fg:  root.dark ? #f9a825 : #8a5300;
 
     // ---- actions -------------------------------------------------------------
     callback sign-in(host: string, user: string, pass: string, insecure: bool);
@@ -48,6 +77,9 @@ export component App inherits Window {
     callback choose-files();
     callback go-up();
     callback open-entry(path: string);
+    /// Enter in the folder field. The path arrives as typed; `canonical` in Rust decides what it
+    /// means, so the field never has to be a valid path while it is being edited.
+    callback browse-folder(path: string);
     callback copy-link(id: string);
     callback re-share(id: string);
     callback delete-link(id: string);
@@ -66,7 +98,10 @@ export component App inherits Window {
     in property <string> usage-text: "";
     in property <float> usage-fraction: 0.0;
     in property <float> upload-progress: -1.0;
+    // Links in the folder being shown only. `elsewhere` counts the rest, so a link that is not
+    // here is reported rather than missing.
     in property <[Link]> links: [];
+    in property <int> elsewhere: 0;
     in property <[Entry]> entries: [];
 
     Rectangle {
@@ -89,7 +124,7 @@ export component App inherits Window {
                         text: "\u{2197}";
                         font-size: 17px;
                         font-weight: 700;
-                        color: #0a0a0a;
+                        color: root.on-accent;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -112,13 +147,19 @@ export component App inherits Window {
                     Text {
                         text: root.demo ? "DEMO" : root.session;
                         font-size: 11px;
-                        color: root.demo ? #f9a825 : root.fg-3;
+                        color: root.demo ? root.demo-fg : root.fg-3;
                     }
                 }
             }
 
             // ---- usage -------------------------------------------------------
-            if root.signed-in: VerticalLayout {
+            // Pinned height. A `if:` element in a layout is a Rectangle wrapper, and the wrapper
+            // takes a share of the leftover space; with both children at stretch 0 that space was
+            // split between the label and the 4px bar, so the bar drifted ~150px below the text it
+            // belongs to. Give the block its own height and the label and bar stay together.
+            if root.signed-in: Rectangle {
+                height: 26px;
+                VerticalLayout {
                 spacing: 4px;
                 Text { text: root.usage-text; font-size: 11px; color: root.fg-3; }
                 Rectangle {
@@ -131,6 +172,7 @@ export component App inherits Window {
                         border-radius: 2px;
                         background: root.accent;
                     }
+                }
                 }
             }
 
@@ -194,14 +236,18 @@ export component App inherits Window {
                     text: root.folder;
                     placeholder-text: "/Public";
                     horizontal-stretch: 1;
+                    accepted => { root.browse-folder(self.text); }
                 }
+                // Words, not glyphs. `↻` (U+21BB) is not in the UI font and rendered as a blank
+                // button; the private-use codepoints of Segoe MDL2 Assets would work but turn into
+                // tofu on the macOS iteration build, where no such font exists.
                 Button {
-                    text: "\u{2191}";
+                    text: "Up";
                     height: 32px;
                     clicked => { root.go-up(); }
                 }
                 Button {
-                    text: "\u{21bb}";
+                    text: "Refresh";
                     height: 32px;
                     enabled: !root.busy;
                     clicked => { root.refresh(); }
@@ -239,18 +285,33 @@ export component App inherits Window {
 
             // ---- links -------------------------------------------------------
             if root.signed-in: Text {
-                text: "SHARE LINKS";
+                text: "SHARE LINKS IN THIS FOLDER";
                 font-size: 10px;
                 font-weight: 600;
                 color: root.fg-3;
             }
 
+            // No height binding here. An earlier `height: (links + entries) * 52px` made the
+            // scroll view's preferred size the size of its whole content, so the window grew to
+            // ~1000px tall on a real drive and still showed rows clipped at the bottom: the
+            // scroll view never had a viewport smaller than its content, so it could not scroll.
+            // Stretch to fill what the rest of the layout leaves, and scrolling is automatic.
             ScrollView {
-                height: (root.links.length + root.entries.length) * 52px;
                 vertical-stretch: 1;
+                min-height: 120px;
 
                 VerticalLayout {
                     spacing: 4px;
+
+                    // Empty is a state, not a blank rectangle: say which of the two empties this is.
+                    if root.links.length == 0: Text {
+                        height: 30px;
+                        vertical-alignment: center;
+                        text: root.entries.length == 0 ? "Nothing in this folder."
+                                                       : "No share links in this folder yet.";
+                        font-size: 11px;
+                        color: root.fg-3;
+                    }
 
                     for ln in root.links: Rectangle {
                         height: 54px;
@@ -288,7 +349,8 @@ export component App inherits Window {
                                 width: 26px; height: 26px;
                                 border-radius: 6px;
                                 visible: rowta.has-hover;
-                                background: delta.has-hover ? #3a3a3a : transparent;
+                                background: delta.has-hover ? (root.dark ? #ffffff2e : #0000001a)
+                                                            : transparent;
                                 delta := TouchArea {
                                     mouse-cursor: MouseCursor.pointer;
                                     clicked => { root.delete-link(ln.id); }
@@ -296,8 +358,10 @@ export component App inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        text: "\u{2715}";
-                                        font-size: 11px;
+                                        // U+00D7 rather than U+2715: the multiplication sign is in
+                                        // every UI font, the heavy multiplication sign is not.
+                                        text: "\u{00d7}";
+                                        font-size: 13px;
                                         color: root.fg-3;
                                         horizontal-alignment: center;
                                     }
@@ -309,9 +373,12 @@ export component App inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        text: ln.live ? "\u{2398}" : "\u{21bb}";
-                                        font-size: 13px;
-                                        color: root.fg-3;
+                                        // Words for the same reason as the toolbar: these codepoints
+                                        // are not in the UI font. The row's own click already does
+                                        // the right thing; this only says what the right thing is.
+                                        text: ln.live ? "copy" : "new";
+                                        font-size: 10px;
+                                        color: ln.live ? root.fg-3 : root.accent;
                                         horizontal-alignment: center;
                                     }
                                 }
@@ -341,6 +408,16 @@ export component App inherits Window {
                             }
                         }
                     }
+
+                    // Reported, never hidden — same reason the macOS popover says it.
+                    if root.elsewhere > 0: Text {
+                        height: 22px;
+                        vertical-alignment: center;
+                        text: root.elsewhere == 1 ? "1 other link outside this folder"
+                                                  : "\{root.elsewhere} other links outside this folder";
+                        font-size: 10px;
+                        color: root.fg-3;
+                    }
                 }
             }
 
@@ -356,5 +433,56 @@ export component App inherits Window {
                 }
             }
         }
+    }
+}
+
+// ---- tray -----------------------------------------------------------------
+
+/// The notification-area presence: the Windows counterpart of the macOS menu-bar popover.
+///
+/// It is a top level of its own, so it shares no state with `App` — Rust copies the window's
+/// folder/usage/session in via `sync_tray`, and the window stays the source of truth. That is
+/// deliberate: a tray that reads its own copy of the data is how the macOS popover once ended up
+/// listing links from outside the folder the window was showing.
+///
+/// | macOS popover                 | here                                          |
+/// |-------------------------------|-----------------------------------------------|
+/// | header, folder, usage bar     | tooltip: folder, usage, session, DEMO         |
+/// | links in the current folder   | "Copy newest link" (same live/expired rule)   |
+/// | "Open Window"                 | left-click the icon, or the menu entry        |
+/// | Quit in the session row       | "Quit DriveDrop"                              |
+/// | survives closing the window   | close hides to tray; a visible tray keeps the loop alive |
+export component Tray inherits SystemTrayIcon {
+    icon: @image-url("../icons/app-32.png");
+    title: "DriveDrop";
+
+    // Driven from Rust; see `sync_tray`.
+    in property <bool> signed-in: false;
+    in property <bool> can-copy: false;
+    /// The tooltip is a built-in property, but the generated Rust API does not expose it (nor
+    /// `clicked`), so both are re-exported through here and wired inside the component.
+    in property <string> tip: "DriveDrop";
+    tooltip: root.tip;
+
+    clicked => { root.open-window(); }
+
+    callback open-window();
+    callback upload();
+    callback copy-newest();
+    callback refresh();
+    callback sign-out();
+    callback quit();
+
+    // `activated`, not `clicked` — the item's callback is that name, and the tray icon's own
+    // left-click callback (which does exist on SystemTrayIcon) is a different thing.
+    Menu {
+        MenuItem { title: "Open DriveDrop"; activated => { root.open-window(); } }
+        MenuItem { title: "Upload files\u{2026}"; enabled: root.signed-in; activated => { root.upload(); } }
+        MenuSeparator {}
+        MenuItem { title: "Copy newest link"; enabled: root.can-copy; activated => { root.copy-newest(); } }
+        MenuItem { title: "Refresh"; enabled: root.signed-in; activated => { root.refresh(); } }
+        MenuSeparator {}
+        MenuItem { title: "Sign out"; enabled: root.signed-in; activated => { root.sign-out(); } }
+        MenuItem { title: "Quit DriveDrop"; activated => { root.quit(); } }
     }
 }

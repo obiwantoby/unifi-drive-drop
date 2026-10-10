@@ -135,9 +135,7 @@ pub fn wait_until_visible(base: &str, token: Option<&str>, qualified_path: &str,
 /// path typed, pasted or reconstructed from what you can see does not match the real one
 /// and the console answers 404.
 pub fn fold_invisible(s: &str) -> String {
-    s.replace('\u{202F}', " ")
-        .replace('\u{00A0}', " ")
-        .replace('\u{2007}', " ")
+    s.replace(['\u{202F}', '\u{00A0}', '\u{2007}'], " ")
         .replace('\u{FEFF}', "")
         .trim()
         .to_string()
@@ -307,7 +305,7 @@ impl LiveClient {
         Ok(r)
     }
 
-    fn require_ok<'a>(&self, r: &'a Resp, what: &str) -> Result<Value> {
+    fn require_ok(&self, r: &Resp, what: &str) -> Result<Value> {
         if !(200..=299).contains(&r.status) {
             let msg = r
                 .json()
@@ -663,7 +661,8 @@ impl LiveClient {
     pub fn session(&self) -> Option<(String, String, i64)> {
         let t = self.token.lock().unwrap().clone()?;
         let c = self.csrf.lock().unwrap().clone()?;
-        let e = self.token_expire.lock().unwrap().clone()?;
+        // Copy, not clone: `Option<i64>` does not need the clone clippy would flag.
+        let e = (*self.token_expire.lock().unwrap())?;
         Some((t, c, e))
     }
 
@@ -744,15 +743,24 @@ impl DriveClient for MockClient {
     fn list_links(&self) -> Result<Vec<ShareItem>> {
         Ok(self.store.lock().unwrap().clone())
     }
-    fn upload(&self, path: &Path, _folder: &str, progress: &(dyn Fn(f32) + Send + Sync)) -> Result<ShareItem> {
+    fn upload(&self, path: &Path, folder: &str, progress: &(dyn Fn(f32) + Send + Sync)) -> Result<ShareItem> {
         for i in 1..=10 {
             std::thread::sleep(std::time::Duration::from_millis(40));
             progress(i as f32 / 10.0);
         }
         let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        // Honour the folder the caller asked for. A mock that always answers `/Public` hides a
+        // wrong folder argument, which is exactly the class of bug that ends with files in a
+        // directory nobody chose.
+        let dir = folder.trim().trim_matches('/');
+        let file_id = if dir.is_empty() {
+            format!("/mydrive/{name}")
+        } else {
+            format!("/mydrive/{dir}/{name}")
+        };
         Ok(ShareItem {
             id: format!("demo-{}", uuid::Uuid::new_v4()),
-            file_id: format!("/mydrive/Public/{name}"),
+            file_id,
             name,
             size: 0,
             share_url: None,

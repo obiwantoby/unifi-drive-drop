@@ -99,9 +99,33 @@ cd apps/windows-ui && cargo build                  # runs on macOS too, for styl
 DRIVEDROP_LIVE=1 cargo test --test live -- --ignored --nocapture   # live, self-cleaning
 ```
 
-Windows CI: `.github/workflows/windows.yml` builds both crates on `windows-latest`. **That is
-the verification gate for the UI** — Slint compiles cross-platform but Mica, the tray, and
-native dialogs can only be confirmed on Windows.
+Windows CI: `.github/workflows/windows.yml` builds both crates on `windows-latest`. It is the gate
+for anything that has to compile, but the UI is now also run on real Windows, because four of the
+bugs below were only visible with the window on screen:
+
+```
+rustup default stable-x86_64-pc-windows-msvc    # the GNU toolchain needs a binutils dlltool
+./tools/shot-pw.ps1  -Out shot.png              # capture the window (see the GL caveat below)
+./tools/click.ps1 -Name Connect                 # press a control by name via UI Automation
+./tools/where.ps1                               # rect / DPI / monitor, when a capture looks wrong
+
+SLINT_BACKEND=software ./target/debug/drivedrop-ui.exe   # the capturable renderer
+DRIVEDROP_NO_ACRYLIC=1 ./target/debug/drivedrop-ui.exe   # rule the backdrop out in one run
+```
+
+`shot-pw.ps1` uses `PrintWindow`, which **does not capture the femtovg/GL surface** — it returns a
+blank client area for a window that is rendering perfectly, which is how one debugging session
+went looking for a rendering bug that did not exist. Use `SLINT_BACKEND=software` for captures.
+A plain `CopyFromScreen` grab is worse on this machine: it returns only the wallpaper, for every
+window (`shot_notepad.png` proves it), so it can never be evidence that an app draws nothing.
+Judge the acrylic itself only from a real screen capture (Win+Shift+S).
+
+The icon set is generated, not hand-saved:
+
+```
+cargo run --manifest-path tools/icon-gen/Cargo.toml -- \
+    apps/windows-ui/icons/app-1024.png apps/windows-ui/icons/drivedrop.ico
+```
 
 Release version lives in **one place**: `apps/macos/VERSION`. Both build scripts read it. Do not
 hardcode a version anywhere else; an earlier setup read it from a previously built bundle, which
@@ -140,6 +164,33 @@ Write these down; every one was discovered the hard way.
 - Slint: struct fields are comma-separated; `fluent` is **not** a crate feature (the style is
   chosen in `build.rs`); `LineEdit` has no `echo-mode` — use `input-type: InputType.password`;
   buttons have no `tooltip`; `ModelRc` is built from `Rc<VecModel<_>>`.
+- `windows_subsystem` accepts only `"windows"` or `"console"`. `= "main"` is E0539 and it killed
+  the release build of the UI on Windows while debug kept building, because `cfg_attr` excluded it
+  there — a broken release config is invisible to the person working in debug.
+- `window_handle()` only answers once winit has created the window, and `App::new()` does not do
+  that. Called early it returns `HandleError::NotSupported`, the error is swallowed, and the window
+  keeps its painted surface forever. Hook `RenderingState::RenderingSetup` instead — and note the
+  **software renderer reports `Unsupported` for the notifier**, so it needs a timer retry or
+  `SLINT_BACKEND=software` silently loses the backdrop.
+- Acrylic and Mica need the window to not paint opaque over the backdrop. Slint's winit backend
+  only *requests* a transparent surface on macOS (`wants_transparent` is `cfg(target_os = "macos")`)
+  — on Windows the backdrop still composites, but nothing about that is guaranteed by the API, so
+  the UI paints its translucent palette only after `apply_backdrop` reports success.
+- The Fluent controls follow the OS light/dark by themselves and there is **no supported override**
+  in 1.18: `Palette` is a read-only global (instantiating it is "Cannot create an instance of a
+  global", assigning to it is a parse error). Hand-painted text has to follow the OS too —
+  `AppsUseLightTheme` from the registry, polled, or the first Windows run is white-on-white.
+- `if cond: SomeLayout {}` inside a layout is a **Rectangle wrapper that takes a share of the
+  leftover space**. With both children at stretch 0 that space was split between a caption and a
+  4 px bar, so the bar drifted 150 px below its label. Pin the wrapper's height.
+- Glyph coverage in the UI font is smaller than the Unicode chart: `↗` (U+2197) renders, `↻`
+  (U+21BB) and `⤘` (U+2398) come out blank, which is how a toolbar ends up with an unlabelled
+  button. Words, or Segoe MDL2 — and MDL2's private-use codepoints are tofu on macOS.
+- Tray: needs the `system-tray` feature on `slint`. Menu items fire **`activated`**, not `clicked`;
+  the tray icon's own `clicked` is a different callback and is **not exposed** on a
+  SystemTrayIcon-rooted component, nor is `tooltip` — forward both through properties on the
+  component. A tray and a window share no globals.
+- Slint components are **not `Send`**.
 - Slint components are **not `Send`**. Workers post through a channel and the UI thread drains
   it. Never touch the UI from a thread. Consequently shared state must be
   `Arc<Mutex<…>>`, not `Rc<RefCell<…>>`.
@@ -163,19 +214,24 @@ Write these down; every one was discovered the hard way.
 
 ## Feature parity checklist (Windows vs macOS)
 
-Implemented on both: sign in, folder browse, upload with progress, auto-share with default
-expiry, click-to-copy, expired rows offer "new link" instead of copying a dead URL, delete link,
-usage display, session lifetime, demo mode.
+Implemented on both: sign in, folder browse (Windows: Enter in the path field, `Up`, and clicking
+a directory), upload with progress **to the folder being shown**, auto-share with default expiry,
+click-to-copy, expired rows offer "new link" instead of copying a dead URL, delete link, usage
+display, session lifetime, demo mode, links scoped to the current folder with the count left
+outside it reported, and a resident presence (menu-bar item / system tray) whose tooltip carries
+folder, usage and session.
+
+Windows-only: acrylic backdrop (`window-vibrancy`, with Mica as the fallback and a painted surface
+after that), close-hides-to-tray, and a generated `.ico` in the exe plus the window/tray icons.
+Presence is no longer the gap it was; the API layer still is the thing to watch — `apps/windows`
+is the single implementation both the CLI and the UI consume, and a second implementation of the
+same contract drifts into a corrupt upload rather than a wrong pixel.
 
 macOS only so far: drag-and-drop onto the window, zip-on-drop for directories, right-click
-context menu, default-expiration picker in settings, copy-on-upload preference, menu-bar resident
-list. Windows has no tray icon yet, which is the biggest gap — the macOS tool is mostly used from
-the menu bar.
+context menu, default-expiration picker in settings, copy-on-upload preference.
 
-Password persistence: macOS yes (Keychain), **Windows no** — see step 3.
-
-Windows only so far: nothing. It is the lagging platform; do not let the API layer diverge —
-`apps/windows` is the single implementation both the CLI and the UI consume.
+Password persistence: macOS yes (Keychain), **Windows no** — the session password lives in memory
+only. Credential Manager is the fix, and the `keyring` crate covers both platforms — see step 3.
 
 ## Known unknowns
 

@@ -1,12 +1,15 @@
 //! Terminal front-end for the Drive client.
 //!
-//! The egui/Fluent GUI is not implemented yet, so this binary is what proves the API port
-//! works end to end on Windows. It is also useful on its own: scripting uploads.
+//! The GUI lives in `apps/windows-ui`; this binary is the same client on a keyboard, and it is
+//! what you script uploads with.
+//!
+//! Addresses below use `console.local` and the RFC 5737 documentation range (`192.0.2.0/24`) —
+//! never a real console. See "Never commit" in `AGENTS.md`.
 //!
 //! ```text
-//! set DRIVEDROP_HOST=192.168.1.10
-//! set DRIVEDROP_USER=admin
-//! set DRIVEDROP_PASS=secret
+//! set DRIVEDROP_HOST=https://console.local     # or 192.0.2.10, or your console's address
+//! set DRIVEDROP_USER=<your local account>
+//! set DRIVEDROP_PASS=...
 //! drivedrop ls /Public
 //! drivedrop put .\invoice.pdf --dir /Public --share --expire 7d
 //! ```
