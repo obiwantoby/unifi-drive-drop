@@ -447,6 +447,7 @@ export component App inherits Window {
 
             // ---- links -------------------------------------------------------
             if root.signed-in: Text {
+                vertical-stretch: 0;
                 text: "SHARE LINKS IN THIS FOLDER";
                 font-size: 10px;
                 font-weight: 600;
@@ -469,11 +470,17 @@ export component App inherits Window {
 
                 VerticalLayout {
                     spacing: 4px;
+                    // Explicit, not left to the default. A layout that stretches its leftover space
+                    // between items is the only thing that explains a single ~270px gap opening
+                    // between two groups with nothing in it, after every child was pinned to
+                    // `vertical-stretch: 0`.
+                    alignment: start;
 
                     // Empty is a state, not a blank rectangle — but there are three empties, and
                     // "Nothing in this folder." while not connected implies a folder was asked
                     // about. Say which state this actually is.
                     if root.links.length == 0: Text {
+                        vertical-stretch: 0;
                         height: 30px;
                         vertical-alignment: center;
                         text: !root.signed-in ? ""
@@ -602,83 +609,98 @@ export component App inherits Window {
                     // window surface next to a link sitting on a card read as two kinds of link and
                     // nothing else. They are different objects from the console - one is a share, one
                     // is a file - and the list has to say which is which.
-                    if root.entries.length > 0: Text {
-                        text: "FILES IN THIS FOLDER";
-                        font-size: 10px;
-                        font-weight: 600;
-                        color: root.fg-3;
-                    }
-
-                    for en in root.entries: Rectangle {
-                        height: 44px;
-                        vertical-stretch: 0;
-                        border-radius: 6px;
-                        background: te.has-hover ? root.card-hi : transparent;
-                        te := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
-                            // A file row is not decoration. Left click does the one useful thing:
-                            // copy the link if there is one, make one if there is not. This used to
-                            // be `if en.is-dir` and nothing else, which is why files looked inert -
-                            // and they were drawn in the dimmest grey in the palette on top of that.
-                            clicked => {
-                                if en.is-dir { root.open-entry(en.path); }
-                                else if en.link-id != "" { root.copy-link(en.link-id); }
-                                else { root.create-link(en.path); }
-                            }
-                            pointer-event(event) => {
-                                if (event.button == PointerEventButton.right
-                                    && event.kind == PointerEventKind.up) {
-                                    root.menu-entry = true;
-                                    root.menu-dir = en.is-dir;
-                                    root.menu-path = en.path;
-                                    root.menu-id = en.link-id;
-                                    root.menu-name = en.name;
-                                    root.menu-direct = en.direct;
-                                    root.menu-exp = -1;
-                                    root.menu-x = te.absolute-position.x + te.mouse-x
-                                                - root.absolute-position.x;
-                                    root.menu-y = te.absolute-position.y + te.mouse-y
-                                                - root.absolute-position.y;
-                                    ctx.show();
-                                }
-                            }
+                    // `vertical-stretch: 0` on every item in this list, including the headings.
+                    // Stretching on a layout's axis is the default for Text as well as Rectangle,
+                    // so a heading with nothing else to fill the viewport grew to ~270px and drew
+                    // its words at the top of that box - which is the "large blank white spot" a
+                    // user saw after deleting the last file, and what made the file rows look like
+                    // they had fallen to the bottom of the window.
+                    // The files group is one layout of its own. Two sibling blocks in the parent
+                    // (an `if` heading and a `for` list) left ~270px of empty space between them
+                    // that no amount of `vertical-stretch: 0` on the children removed; as a single
+                    // atomic layout the leftover lands at the bottom of the list where it belongs.
+                    if root.entries.length > 0: VerticalLayout {
+                        spacing: 4px;
+                        if root.entries.length > 0: Text {
+                            vertical-stretch: 0;
+                            text: "FILES IN THIS FOLDER";
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: root.fg-3;
                         }
-                        HorizontalLayout {
-                            spacing: 10px;
-                            padding-left: 10px;
-                            padding-right: 12px;
-                            VerticalLayout {
-                                alignment: center;
-                                Text {
-                                    text: en.name;
-                                    font-size: 14px;
-                                    color: root.fg;
-                                    overflow: elide;
+
+                        for en in root.entries: Rectangle {
+                            height: 44px;
+                            vertical-stretch: 0;
+                            border-radius: 6px;
+                            background: te.has-hover ? root.card-hi : transparent;
+                            te := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                // A file row is not decoration. Left click does the one useful thing:
+                                // copy the link if there is one, make one if there is not. This used to
+                                // be `if en.is-dir` and nothing else, which is why files looked inert -
+                                // and they were drawn in the dimmest grey in the palette on top of that.
+                                clicked => {
+                                    if en.is-dir { root.open-entry(en.path); }
+                                    else if en.link-id != "" { root.copy-link(en.link-id); }
+                                    else { root.create-link(en.path); }
+                                }
+                                pointer-event(event) => {
+                                    if (event.button == PointerEventButton.right
+                                        && event.kind == PointerEventKind.up) {
+                                        root.menu-entry = true;
+                                        root.menu-dir = en.is-dir;
+                                        root.menu-path = en.path;
+                                        root.menu-id = en.link-id;
+                                        root.menu-name = en.name;
+                                        root.menu-direct = en.direct;
+                                        root.menu-exp = -1;
+                                        root.menu-x = te.absolute-position.x + te.mouse-x
+                                                    - root.absolute-position.x;
+                                        root.menu-y = te.absolute-position.y + te.mouse-y
+                                                    - root.absolute-position.y;
+                                        ctx.show();
+                                    }
                                 }
                             }
-                            // `horizontal-stretch`, not `vertical-stretch`: this is a HorizontalLayout,
-                            // and a stretch on the cross axis is what let a 44px row grow to fill the
-                            // list.
-                            Rectangle { horizontal-stretch: 1; }
-                            Rectangle {
-                                width: 34px; height: 26px;
-                                visible: te.has-hover;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                padding-left: 10px;
+                                padding-right: 12px;
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        text: en.is-dir ? "open"
-                                                        : (en.link-id != "" ? "copy" : "link");
-                                        font-size: 10px;
-                                        color: root.fg-3;
-                                        horizontal-alignment: center;
+                                        text: en.name;
+                                        font-size: 14px;
+                                        color: root.fg;
+                                        overflow: elide;
+                                    }
+                                }
+                                // `horizontal-stretch`, not `vertical-stretch`: this is a HorizontalLayout,
+                                // and a stretch on the cross axis is what let a 44px row grow to fill the
+                                // list.
+                                Rectangle { horizontal-stretch: 1; }
+                                Rectangle {
+                                    width: 34px; height: 26px;
+                                    visible: te.has-hover;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Text {
+                                            text: en.is-dir ? "open"
+                                                            : (en.link-id != "" ? "copy" : "link");
+                                            font-size: 10px;
+                                            color: root.fg-3;
+                                            horizontal-alignment: center;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
+                    }
                     // Reported, never hidden — same reason the macOS popover says it.
                     if root.elsewhere > 0: Text {
+                        vertical-stretch: 0;
                         height: 22px;
                         vertical-alignment: center;
                         text: root.elsewhere == 1 ? "1 other link outside this folder"

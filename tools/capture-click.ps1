@@ -12,7 +12,7 @@ param(
     [Parameter(Mandatory)][int]$X,
     [Parameter(Mandatory)][int]$Y,
     [string]$Process = "drivedrop-ui",
-    [switch]$Right,
+    [switch]$Move, [switch]$Right,
     [switch]$Middle
 )
 Add-Type @"
@@ -85,6 +85,7 @@ Start-Sleep -Milliseconds 250
 [CapClick]::SetCursorPos($sx, $sy) | Out-Null
 Start-Sleep -Milliseconds 120
 if ([CapClick]::GetForegroundWindow() -ne $h) { Write-Warning "window is still not foreground" }
+if ($Move)   { Write-Host "moved only"; exit 0 }
 if ($Right)  { [CapClick]::mouse_event(0x0008, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 80; [CapClick]::mouse_event(0x0010, 0, 0, 0, [IntPtr]::Zero) }
 elseif ($Middle) { [CapClick]::mouse_event(0x0020, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 80; [CapClick]::mouse_event(0x0040, 0, 0, 0, [IntPtr]::Zero) }
 else { [CapClick]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 80; [CapClick]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero) }

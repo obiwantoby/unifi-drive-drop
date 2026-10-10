@@ -248,6 +248,28 @@ Write these down; every one was discovered the hard way.
   directory with the same two fixtures hides a wrong folder argument, which is how files end up in a
   directory nobody chose.
 
+### A Slint layout's default alignment spreads its children apart
+
+Deleting a file left "a large blank white spot": the share links sat at the top of the list and the
+file rows at the bottom, with ~270px of nothing between them. The layout's default alignment
+distributes leftover space *between* items, so a short list in a tall window is pulled apart. Pin it:
+
+```slint
+VerticalLayout { alignment: start;   /* not the default */ }
+```
+
+What made this hard, and what to do instead of repeating it:
+
+- `vertical-stretch: 0` on every child did **nothing** — the space was being distributed by the
+  layout, not claimed by a child.
+- Wrapping the two groups in their own layout did nothing either.
+- Hovering the empty region showed no row there, and painting the rows red showed them correctly
+  sized at the bottom. Both were fast, both were decisive, and both were worth more than the
+  reasoning they replaced: several confident explanations (a stretched heading, a stretched row, a
+  stray spacer) were each wrong, and each cost a build and a screenshot.
+- When a layout looks wrong, first ask what the layout is doing with its leftover space, not what
+  the children are doing with theirs.
+
 ### Parity with the macOS app, honestly
 
 The first pass at the Windows menu claimed parity and did not have it. Reading `ContentView.swift`
