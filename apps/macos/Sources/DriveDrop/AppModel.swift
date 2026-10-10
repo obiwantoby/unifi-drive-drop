@@ -561,14 +561,78 @@ final class AppModel: ObservableObject {
         } catch { status = error.localizedDescription }
     }
 
-    func copy(_ s: String, label: String = "Copied") {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(s, forType: .string)
+    /// The row whose actions are currently expanded in the menu bar.
+    @Published var openRowID: String?
+
+    /// One click on a menu-bar row.
+    ///
+    /// Live link → copy. Anything else → expand that row's own actions instead of refusing
+    /// silently, because "not shared yet" and "this expired" want different next moves and a
+    /// toast that vanishes in 1.8 s is not a conversation.
+    func tap(_ item: ShareItem) {
+        switch RowTapPolicy.decide(item, now: Date(), demo: usingMock) {
+        case .copy(let url):
+            copy(url.absoluteString, label: "Link copied")
+            openRowID = nil
+        case .offer:
+            openRowID = (openRowID == item.id) ? nil : item.id
+        }
+    }
+
+    /// Give a row a link, replacing one that is already dead.
+    ///
+    /// Only reachable from `RowAction.reShare`, which the policy offers solely for an expired
+    /// link or an unshared file. That restriction is the whole safety argument: recreating a
+    /// link rotates its token, so doing it to a **live** link would invalidate a URL the user
+    /// may already have sent. An expired URL is failing anyway, so there is nothing to break.
+    func reShare(_ item: ShareItem) async {
+        guard !item.fileId.isEmpty else {
+            status = "Nothing to share — the file is not on the Drive"
+            return
+        }
+        do {
+            // Best effort: an expired link may already be pruned server-side, and a row with
+            // no link has nothing to delete. Neither should stop the new link being made.
+            if item.phase == .ready, !item.id.isEmpty {
+                _ = try? await client.delete(item)
+            }
+            let made = try await client.createShare(for: item.fileId,
+                                                    expiration: defaultExpiration,
+                                                    password: nil)
+            if let i = items.firstIndex(where: { $0.id == item.id }) {
+                items[i] = made
+            } else {
+                items.insert(made, at: 0)
+            }
+            openRowID = nil
+            status = ""
+            if let u = made.shareURL {
+                copy(u.absoluteString, label: "New link copied")
+            } else {
+                toast = "Link created"
+            }
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func copy(_ s: String, label: String = "Copied") -> Bool {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        // setString returns false when the pasteboard refuses — secure input, or another
+        // process holding it. Saying "Link copied" after that is a lie that only surfaces
+        // when the paste comes up empty somewhere else.
+        guard pb.setString(s, forType: .string) else {
+            status = "Clipboard refused the write — copy it from the window"
+            return false
+        }
         toast = label
         Task {
             try? await Task.sleep(for: .seconds(1.8))
             if toast == label { toast = nil }
         }
+        return true
     }
 
     /// Drop a failed row out of the list without retrying it.

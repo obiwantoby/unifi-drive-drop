@@ -305,6 +305,77 @@ Task { @MainActor in
         expect(m.items.contains { $0.id == "bad" }, "a failed row persists across refreshes")
     }
 
+    // 11 -- click policy: copy what is live, offer actions for everything else ------------
+    do {
+        func item(_ phase: UploadPhase, url: String?, exp: Date?) -> ShareItem {
+            ShareItem(id: "L1", fileId: "/mydrive/Public/x.bin", name: "x.bin", size: 1,
+                      shareURL: url.flatMap(URL.init(string:)), directURL: nil,
+                      createdAt: .now, expiresAt: exp, phase: phase, progress: 1)
+        }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let live = "https://drop.ui.com/7582b11a-bdce-453c-ac95-99364473bc43"
+
+        func copies(_ i: ShareItem, demo: Bool = false) -> Bool {
+            if case .copy = RowTapPolicy.decide(i, now: now, demo: demo) { return true }
+            return false
+        }
+
+        expect(copies(item(.ready, url: live, exp: nil)),
+               "a link with no expiry copies (nil means NEVER, not unknown)")
+        expect(copies(item(.ready, url: live, exp: now.addingTimeInterval(1))),
+               "one second of life left still copies — no early-refuse margin")
+        expect(!copies(item(.ready, url: live, exp: now)),
+               "expiry is inclusive: at the instant it passes the URL is dead")
+        expect(!copies(item(.ready, url: live, exp: now.addingTimeInterval(-1))),
+               "a link that expired a second ago does not copy")
+
+        // The one this app invented: mock rows carry a plausible https://drop.ui.com URL that
+        // belongs to nobody. Copying it is a lie that survives until the paste.
+        expect(!copies(item(.ready, url: live, exp: nil), demo: true),
+               "demo mode never copies, however real the URL looks")
+
+        expect(!copies(item(.ready, url: nil, exp: nil)),
+               "a ready row with no share URL offers actions instead")
+        expect(!copies(item(.ready, url: "http://drop.ui.com/abc", exp: nil)),
+               "a non-https URL is refused, not copied")
+
+        // A failure message can contain a URL. It gets shown, never copied.
+        let msg = "rejected: https://drop.ui.com/deadbeef already has a link"
+        if case .offer(.failed(let m)) = RowTapPolicy.decide(
+            item(.failed(msg), url: nil, exp: nil), now: now, demo: false) {
+            expect(m == msg, "the failure text is surfaced verbatim")
+        } else {
+            expect(false, "a failed row offers .failed, whatever its message says")
+        }
+
+        for (phase, want) in [(UploadPhase.uploading(0.4), "uploading"),
+                              (.finalizing, "finalizing"), (.sharing, "sharing"),
+                              (.queued, "queued")] {
+            if case .offer = RowTapPolicy.decide(item(phase, url: nil, exp: nil),
+                                                 now: now, demo: false) { expect(true, "\(want) offers actions") }
+            else { expect(false, "\(want) must not copy") }
+        }
+
+        // A directory share is still a share: one URL, same policy.
+        let dirItem = ShareItem(id: "D1", fileId: "/mydrive/Public/afolder", name: "afolder",
+                                size: 0, shareURL: URL(string: live), directURL: nil,
+                                createdAt: .now, expiresAt: nil, phase: .ready, progress: 1)
+        if case .copy(let u) = RowTapPolicy.decide(dirItem, now: now, demo: false) {
+            expect(u.absoluteString == live, "a folder link copies that exact URL, unchanged")
+        } else { expect(false, "a folder link should copy") }
+
+        // THE safety property: reShare may never be offered for something that still works.
+        // Recreating a link rotates its token and kills a URL already sent to someone.
+        for u: RowUnavailable in [.expired, .noLink] {
+            expect(RowTapPolicy.actions(for: u).contains(.reShare), "\(u) offers reShare")
+        }
+        for u: RowUnavailable in [.demo, .queued, .uploading, .finalizing, .sharing,
+                                  .failed("boom")] {
+            expect(!RowTapPolicy.actions(for: u).contains(.reShare),
+                   "reShare is never offered for \(u) — rotating could kill a live URL")
+        }
+    }
+
     print(failures == 0 ? "\nALL RACES PASSED" : "\n\(failures) RACE(S) FAILED")
     exit(failures == 0 ? 0 : 1)
 }

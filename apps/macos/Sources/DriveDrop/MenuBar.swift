@@ -23,6 +23,27 @@ struct MenuBarContent: View {
         }
     }
 
+    /// Render-time decision, refreshed by the 60 s tick.
+    ///
+    /// Computed here rather than inline because a `switch` with assignments is not a View, and
+    /// the click path makes its own decision with a fresh `Date()` — so a row that expired
+    /// since the last render still refuses correctly instead of copying a dead URL.
+    private func rowState(_ item: ShareItem) -> (live: Bool, why: String, offer: RowUnavailable?) {
+        switch RowTapPolicy.decide(item, now: Date(), demo: model.usingMock) {
+        case .copy:            return (true, "Copy the share URL", nil)
+        case .offer(let rest): return (false, rest.why, rest)
+        }
+    }
+
+    private func actionIcon(_ a: RowAction) -> String {
+        switch a {
+        case .reShare:    return "arrow.clockwise"
+        case .retry:      return "arrow.triangle.2.circlepath"
+        case .dismiss:    return "xmark"
+        case .openWindow: return "macwindow"
+        }
+    }
+
     /// Links inside the folder the main window is showing.
     ///
     /// This used to be `model.items.prefix(6)` — every link on the whole drive — so the menu
@@ -35,6 +56,17 @@ struct MenuBarContent: View {
 
     /// Links elsewhere on the drive, reported so they are not simply hidden.
     private var elsewhere: Int { model.items.count - shown.count }
+
+    /// Newest first, so the file you just dropped is the one under the pointer.
+    ///
+    /// The id tie-break is not decoration: two rows created in the same second would otherwise
+    /// swap places on a refresh and move a different row under the cursor mid-click.
+    private var ordered: [ShareItem] {
+        shown.sorted {
+            if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+            return $0.id < $1.id
+        }
+    }
 
     var body: some View {
         // Header -------------------------------------------------------------
@@ -84,16 +116,21 @@ struct MenuBarContent: View {
                 .font(.caption).foregroundStyle(.tertiary)
                 .padding(.horizontal, 10).padding(.vertical, 6)
         } else {
-            ForEach(shown) { item in
-                Button {
-                    if let s = item.shareURL?.absoluteString { model.copy(s, label: "Link copied") }
-                } label: {
+            ForEach(ordered) { item in
+              Group {
+                let st = rowState(item)
+
+                Button { model.tap(item) } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "link")
+                        Image(systemName: st.live ? "link" : "link.badge.questionmark")
+                            .foregroundStyle(st.live ? Color.primary : Color.secondary)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(item.name).lineLimit(1).font(.callout)
                             if let c = Fmt.countdown(to: item.expiresAt) {
-                                Text(c).font(.caption2).foregroundStyle(.secondary)
+                                Text(c).font(.caption2)
+                                    .foregroundStyle(st.live ? Color.secondary : Color.orange)
+                            } else if !st.live {
+                                Text(st.why).font(.caption2).foregroundStyle(.secondary)
                             }
                         }
                         Spacer()
@@ -101,7 +138,45 @@ struct MenuBarContent: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .opacity(st.live ? 1 : 0.62)
+                // Not `.disabled` — that would hide the refusal from VoiceOver and leave the
+                // click doing nothing at all, which is the bug this replaces.
+                .accessibilityLabel("\(item.name), \(st.why). \(st.live ? "Copies the link" : "Offers actions")")
                 .padding(.horizontal, 10).padding(.vertical, 3)
+
+                // Nothing to copy → ask what the user wants, right here.
+                if let rest = st.offer, model.openRowID == item.id {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(RowTapPolicy.actions(for: rest), id: \.self) { action in
+                            Button {
+                                switch action {
+                                case .reShare:    Task { await model.reShare(item) }
+                                case .retry:
+                                    if let u = item.localPath { Task { await model.upload(u) } }
+                                    model.openRowID = nil
+                                case .dismiss:
+                                    if case .failed = item.phase { model.dismiss(item) }
+                                    model.openRowID = nil
+                                case .openWindow:
+                                    NSApp.activate(ignoringOtherApps: true)
+                                    openWindow(id: "main")
+                                }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: actionIcon(action))
+                                    Text(action.title)
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .padding(.horizontal, 26).padding(.vertical, 2)
+                        }
+                    }
+                    .padding(.bottom, 3)
+                }
+              }
             }
         }
 
