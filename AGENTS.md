@@ -248,6 +248,39 @@ Write these down; every one was discovered the hard way.
   directory with the same two fixtures hides a wrong folder argument, which is how files end up in a
   directory nobody chose.
 
+### Parity with the macOS app, honestly
+
+The first pass at the Windows menu claimed parity and did not have it. Reading `ContentView.swift`
+instead of guessing turned up four gaps, all now closed except drag-and-drop:
+
+| macOS | Windows before | now |
+|-------|----------------|-----|
+| link row: copy share URL | yes | yes |
+| link row: copy **direct download** URL | missing | yes, row hidden when the console gives no direct URL |
+| link row: **Set expiration** submenu | only "new link" when expired | yes; it replaces the link, and says the old URL dies |
+| **confirmation** before any delete | deleted on one click | overlay dialog, and it states that a file goes to trash rather than being erased |
+| file row: click and right-click at all | `clicked` handled folders only; no right-click | folders open, files copy-or-create a link, both have menus |
+| expired / expiring-soon colour | one grey for everything | red expired, amber under 24h |
+| **drag files onto the window** | impossible | still impossible |
+
+- **Drag-and-drop cannot be done in Slint 1.18.** Its `DropArea` only receives drags started by a
+  `DragArea` in the same app; the winit backend never maps winit's `DroppedFile`/`HoveredFile` (still
+  true on upstream master), so an Explorer drop never reaches Slint. The only route is a hand-written
+  OLE `IDropTarget` on the HWND. Not attempted rather than half-attempted.
+- **A property that is declared and passed but never bound compiles silently.** `MenuRow` took `fg`
+  for every row and its `Text` had no `color:` at all, so every menu item painted black - including
+  the two destructive ones. The red "delete" the user asked for existed only in the source.
+- **Layout arithmetic has to be counted, not assumed.** The context menu's height came from a row
+  count that was not updated when "Set expiration…" was added, so "Delete link" painted itself
+  outside the card. A user's screenshot saw it immediately.
+- **`Rectangle` stretches on a layout's axis by default**, so `height: 54px` on a list row is a wish,
+  not a bound: with two rows in a tall `ScrollView` they grew to 78px and pushed the file rows to the
+  bottom of the window. Rows that must not grow need `vertical-stretch: 0`.
+- **Two lists, one screen, and no label on the second.** Share links render as cards and files render
+  on the bare surface; with no heading over the second one, the user's question was "what is the
+  difference between the grey links and the white links" - a reasonable question about a UI that
+  shows two kinds of object and names neither. `FILES IN THIS FOLDER` now says it.
+
 ### Driving the UI from a script
 
 - **A synthetic click while another window owns the foreground is spent on activation** and never

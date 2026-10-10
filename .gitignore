@@ -38,12 +38,5 @@ target/
 
 # Window captures taken by tools/shot*.ps1 while driving the UI. They are evidence, not source,
 # and they can contain whatever was on screen - including a real console address.
-/shot*.png
-/demo*.png
-/now.png*
-/up.png*
-/up2.png*
-/lbl.png*
-/popup.png*
-/m.png*
-/ctx*.png
+/*.png
+/*.png-*.png

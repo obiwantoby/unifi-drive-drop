@@ -14,12 +14,28 @@ export struct Link {
     name: string,
     subtitle: string,
     live: bool,
+    /// Direct download URL, when the console offers one. Empty means the "copy direct link" row is
+    /// not shown at all rather than shown and disabled.
+    direct: string,
+    /// Expiry tone, so an expired row cannot read as a healthy one: 0 secondary, 1 soon (<24h),
+    /// 2 expired. macOS colours these; the Windows row used to say "expired" in the same grey as
+    /// "never expires".
+    tone: int,
+    /// Index into the expiry menu, -1 when unknown, so "Set expiration" can tick the current one.
+    exp: int,
 }
 
 export struct Entry {
     name: string,
     path: string,
     is-dir: bool,
+    /// The id of the share link that already points at this file, empty when there is none.
+    /// Carried on the row so "copy link" needs no lookup back through the model.
+    link-id: string,
+    /// Direct download URL of that link, empty when there is none or the console gives no direct
+    /// URL. Carried here rather than looked up by id because Slint has no model-search helper and
+    /// scanning the link list from a function is worse than carrying one string.
+    direct: string,
 }
 
 /// One row of the context menu. Hover and enable are per row; the popup is its own top level, so
@@ -47,6 +63,10 @@ component MenuRow inherits Rectangle {
     Text {
         text: root.label;
         font-size: 12px;
+        // `fg` was declared and passed by every caller but never bound here, so every row painted
+        // in the window default: "Delete link" was black, and a destructive item that is not red is
+        // not a warning.
+        color: root.fg;
         // Opacity rather than a second colour: the caller passes one foreground and the disabled
         // state is the same 45% in both themes.
         opacity: root.dim ? 0.45 : 1.0;
@@ -116,6 +136,14 @@ export component App inherits Window {
     callback choose-files();
     callback go-up();
     callback open-entry(path: string);
+    /// Share a file that has no link yet, with the expiry chosen in Settings.
+    callback create-link(path: string);
+    /// Soft delete: the console moves the object to /trash, it does not erase it.
+    callback delete-file(path: string);
+    /// Replace a link with one carrying a different expiry - the only way expiry can change.
+    callback set-expiry(id: string, choice: int);
+    /// Copy an arbitrary string - the direct download URL, which is not the row's own link.
+    callback copy-text(text: string);
     /// Enter in the folder field. The path arrives as typed; `canonical` in Rust decides what it
     /// means, so the field never has to be a valid path while it is being edited.
     callback browse-folder(path: string);
@@ -165,6 +193,44 @@ export component App inherits Window {
     property <bool> menu-live: true;
     property <length> menu-x: 0px;
     property <length> menu-y: 0px;
+    // The same popup serves both lists. A file is not a link: it has no expiry to renew, but it
+    // can be shared, and deleting it is a different (softer, trashed) operation.
+    property <bool> menu-entry: false;
+    property <bool> menu-dir: false;
+    property <string> menu-path: "";
+    property <string> menu-direct: "";
+    property <int> menu-exp: -1;
+
+    // Rows the menu will actually draw. `if` rather than `visible:` everywhere in here, because an
+    // invisible element still occupies its layout slot - which is how "Delete link" once painted
+    // itself outside the card's own border.
+    // Counted against the rows actually drawn, because the card is sized from this and a mismatch
+    // paints the last item outside its own border - which is what happened when "Set expiration…"
+    // was added to the link menu without updating this. A user screenshot saw it, the code did not.
+    //
+    //   link, live or expired : copy, [copy direct], open, set-expiry | new-link, delete  = 4 (+1)
+    //   file with a link      : the four above, plus delete file                          = 5 (+1)
+    //   file without a link   : create link, delete file                                  = 2
+    //   folder                : open folder                                               = 1
+    property <int> menu-rows: root.menu-entry
+        ? (root.menu-dir ? 1
+            : (root.menu-id != "" ? (root.menu-direct != "" ? 6 : 5) : 2))
+        : (root.menu-direct != "" ? 5 : 4);
+
+    // Destructive actions ask first. macOS raises a confirmation dialog; without one, a mis-click
+    // in a context menu moved a file to the trash with no way back from the app.
+    // kind: 0 nothing, 1 link, 2 file
+    property <int> confirm-kind: 0;
+    property <string> confirm-name: "";
+    property <string> confirm-id: "";
+    property <string> confirm-path: "";
+
+    // Expiry picker for an existing link. Expiry is create-only on the console (spec C23), so this
+    // replaces the link and rotates its URL - the menu says so rather than pretending it is a
+    // field you can edit.
+    property <string> exp-id: "";
+    property <string> exp-name: "";
+    property <int> exp-current: -1;
 
     // ---- state ---------------------------------------------------------------
     in property <string> host: "";
@@ -419,6 +485,11 @@ export component App inherits Window {
 
                     for ln in root.links: Rectangle {
                         height: 54px;
+                        // A Rectangle in a layout stretches on the layout's axis by default, so
+                        // "54px" was only a wish: with a short list the rows absorbed the empty
+                        // viewport and grew to 78px, with a long one they fought each other. Pin
+                        // them and let the leftover sit at the bottom of the list where it belongs.
+                        vertical-stretch: 0;
                         border-radius: 8px;
                         background: rowta.has-hover ? root.card-hi : root.card;
                         // Named for assistive tech — and because a row you cannot address by name
@@ -447,6 +518,11 @@ export component App inherits Window {
                                     root.menu-id = ln.id;
                                     root.menu-name = ln.name;
                                     root.menu-live = ln.live;
+                                    root.menu-entry = false;
+                                    root.menu-direct = ln.direct;
+                                    root.menu-exp = ln.exp;
+                                    root.menu-dir = false;
+                                    root.menu-path = "";
                                     root.menu-x = rowta.absolute-position.x + rowta.mouse-x
                                                 - root.absolute-position.x;
                                     root.menu-y = rowta.absolute-position.y + rowta.mouse-y
@@ -471,7 +547,12 @@ export component App inherits Window {
                                 Text {
                                     text: ln.subtitle;
                                     font-size: 12px;
-                                    color: ln.live ? root.fg-3 : root.accent;
+                                    // Expired reads red and expiring-within-a-day amber, so a row
+                                    // nobody will be able to open tomorrow does not look like one
+                                    // that never expires.
+                                    color: ln.tone == 2 ? (root.dark ? #ff6b6b : #c42b1c)
+                                         : ln.tone == 1 ? (root.dark ? #f9a825 : #8a5300)
+                                         : root.fg-3;
                                 }
                             }
                             Rectangle { vertical-stretch: 1; }
@@ -517,24 +598,80 @@ export component App inherits Window {
                         }
                     }
 
+                    // The links above have a heading; these had none, so a file sitting on the bare
+                    // window surface next to a link sitting on a card read as two kinds of link and
+                    // nothing else. They are different objects from the console - one is a share, one
+                    // is a file - and the list has to say which is which.
+                    if root.entries.length > 0: Text {
+                        text: "FILES IN THIS FOLDER";
+                        font-size: 10px;
+                        font-weight: 600;
+                        color: root.fg-3;
+                    }
+
                     for en in root.entries: Rectangle {
                         height: 44px;
+                        vertical-stretch: 0;
                         border-radius: 6px;
-                        background: te.has-hover ? root.card-hi: transparent;
+                        background: te.has-hover ? root.card-hi : transparent;
                         te := TouchArea {
                             mouse-cursor: MouseCursor.pointer;
-                            clicked => { if en.is-dir { root.open-entry(en.path); } }
+                            // A file row is not decoration. Left click does the one useful thing:
+                            // copy the link if there is one, make one if there is not. This used to
+                            // be `if en.is-dir` and nothing else, which is why files looked inert -
+                            // and they were drawn in the dimmest grey in the palette on top of that.
+                            clicked => {
+                                if en.is-dir { root.open-entry(en.path); }
+                                else if en.link-id != "" { root.copy-link(en.link-id); }
+                                else { root.create-link(en.path); }
+                            }
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.right
+                                    && event.kind == PointerEventKind.up) {
+                                    root.menu-entry = true;
+                                    root.menu-dir = en.is-dir;
+                                    root.menu-path = en.path;
+                                    root.menu-id = en.link-id;
+                                    root.menu-name = en.name;
+                                    root.menu-direct = en.direct;
+                                    root.menu-exp = -1;
+                                    root.menu-x = te.absolute-position.x + te.mouse-x
+                                                - root.absolute-position.x;
+                                    root.menu-y = te.absolute-position.y + te.mouse-y
+                                                - root.absolute-position.y;
+                                    ctx.show();
+                                }
+                            }
                         }
                         HorizontalLayout {
                             spacing: 10px;
                             padding-left: 10px;
+                            padding-right: 12px;
                             VerticalLayout {
                                 alignment: center;
                                 Text {
                                     text: en.name;
                                     font-size: 14px;
-                                    color: en.is-dir ? root.fg : root.fg-3;
+                                    color: root.fg;
                                     overflow: elide;
+                                }
+                            }
+                            // `horizontal-stretch`, not `vertical-stretch`: this is a HorizontalLayout,
+                            // and a stretch on the cross axis is what let a 44px row grow to fill the
+                            // list.
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: 34px; height: 26px;
+                                visible: te.has-hover;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: en.is-dir ? "open"
+                                                        : (en.link-id != "" ? "copy" : "link");
+                                        font-size: 10px;
+                                        color: root.fg-3;
+                                        horizontal-alignment: center;
+                                    }
                                 }
                             }
                         }
@@ -619,11 +756,11 @@ export component App inherits Window {
         ctx := PopupWindow {
             close-policy: PopupClosePolicy.close-on-click-outside;
             width: 224px;
-            height: 8px + (root.menu-live ? 3 : 4) * 30px;
+            height: 8px + root.menu-rows * 30px;
             // Clamp inside the window. Without this a right-click on a row near the bottom left
             // the last item off-screen, and "Delete link" is the item you wanted.
             x: Math.max(4px, Math.min(root.menu-x, root.width - 228px));
-            y: Math.max(4px, Math.min(root.menu-y, root.height - (8px + (root.menu-live ? 3 : 4) * 30px)));
+            y: Math.max(4px, Math.min(root.menu-y, root.height - (8px + root.menu-rows * 30px)));
 
             Rectangle {
                 width: 100%; height: 100%;
@@ -634,7 +771,77 @@ export component App inherits Window {
                 // caption that reads differently on every pixel.
                 background: root.dark ? #2b2b2bf5 : #fffffffa;
 
+                // ---- a file or folder, not a link ---------------------------
+                // `if` rather than `visible`, and inside the card rather than beside it: a sibling
+                // of the card painted over the rows, and an invisible layout inside a layout keeps
+                // reserving its space.
+                if root.menu-entry: VerticalLayout {
+                    padding: 4px;
+                    spacing: 0px;
+                    if root.menu-dir: MenuRow {
+                        label: "Open folder";
+                        fg: root.fg;
+                        hi: root.card-hi;
+                        picked => { root.open-entry(root.menu-path); ctx.close(); }
+                    }
+                    if !root.menu-dir && root.menu-id != "": MenuRow {
+                        label: "Copy link";
+                        fg: root.fg;
+                        hi: root.card-hi;
+                        picked => { root.copy-link(root.menu-id); ctx.close(); }
+                    }
+                    if !root.menu-dir && root.menu-direct != "": MenuRow {
+                        label: "Copy direct link";
+                        fg: root.fg;
+                        hi: root.card-hi;
+                        picked => { root.copy-text(root.menu-direct); ctx.close(); }
+                    }
+                    if !root.menu-dir && root.menu-id != "": MenuRow {
+                        label: "Open in browser";
+                        fg: root.fg;
+                        hi: root.card-hi;
+                        picked => { root.open-link(root.menu-id); ctx.close(); }
+                    }
+                    if !root.menu-dir && root.menu-id != "": MenuRow {
+                        label: "Set expiration\u{2026}";
+                        fg: root.fg;
+                        hi: root.card-hi;
+                        picked => {
+                            root.exp-id = root.menu-id;
+                            root.exp-name = root.menu-name;
+                            root.exp-current = -1;
+                            ctx.close();
+                            exp.show();
+                        }
+                    }
+                    if !root.menu-dir && root.menu-id != "": MenuRow {
+                        label: "Delete link";
+                        fg: root.dark ? #ff6b6b : #c42b1c;
+                        hi: root.card-hi;
+                        picked => {
+                            root.confirm-kind = 1;
+                            root.confirm-id = root.menu-id;
+                            root.confirm-name = root.menu-name;
+                            ctx.close();
+
+                        }
+                    }
+                    if !root.menu-dir: MenuRow {
+                        label: "Delete file";
+                        fg: root.dark ? #ff6b6b : #c42b1c;
+                        hi: root.card-hi;
+                        picked => {
+                            root.confirm-kind = 2;
+                            root.confirm-path = root.menu-path;
+                            root.confirm-name = root.menu-name;
+                            ctx.close();
+
+                        }
+                    }
+                }
+
                 VerticalLayout {
+                    visible: !root.menu-entry;
                     padding: 4px;
                     spacing: 0px;
                     MenuRow {
@@ -658,6 +865,25 @@ export component App inherits Window {
                     // layout, so with `visible` the card was sized for three rows and "Delete link"
                     // painted itself outside the bottom border. Caught by looking at a screenshot
                     // rather than by reading the code, which is why we take screenshots.
+                    if root.menu-direct != "": MenuRow {
+                        label: "Copy direct link";
+                        fg: root.menu-live ? root.fg : root.fg-3;
+                        hi: root.card-hi;
+                        dim: !root.menu-live;
+                        picked => { root.copy-text(root.menu-direct); ctx.close(); }
+                    }
+                    if root.menu-live: MenuRow {
+                        label: "Set expiration\u{2026}";
+                        fg: root.fg;
+                        hi: root.card-hi;
+                        picked => {
+                            root.exp-id = root.menu-id;
+                            root.exp-name = root.menu-name;
+                            root.exp-current = root.menu-exp;
+                            ctx.close();
+                            exp.show();
+                        }
+                    }
                     if !root.menu-live: MenuRow {
                         label: "New link";
                         fg: root.accent;
@@ -668,7 +894,59 @@ export component App inherits Window {
                         label: "Delete link";
                         fg: root.dark ? #ff6b6b : #c42b1c;
                         hi: root.card-hi;
-                        picked => { root.delete-link(root.menu-id); ctx.close(); }
+                        picked => {
+                            root.confirm-kind = 1;
+                            root.confirm-id = root.menu-id;
+                            root.confirm-name = root.menu-name;
+                            ctx.close();
+
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- set expiration ---------------------------------------------------
+        // Expiry is create-only on the console, so picking one replaces the link and its URL
+        // changes. The dialog says that in the same breath as the choice, because a link you meant
+        // to extend by an hour is also a link whose previously-shared URL just died.
+        exp := PopupWindow {
+            close-policy: PopupClosePolicy.close-on-click-outside;
+            width: 232px;
+            height: 8px + 6 * 28px;
+            x: Math.max(4px, Math.min(root.menu-x, root.width - 236px));
+            y: Math.max(4px, Math.min(root.menu-y, root.height - (8px + 6 * 28px)));
+
+            Rectangle {
+                width: 100%; height: 100%;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: root.stroke;
+                background: root.dark ? #2b2b2bf5 : #fffffffa;
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 0px;
+
+                    for choice[index] in ["1 hour", "24 hours", "7 days", "30 days", "Never"]:
+                        MenuRow {
+                        label: root.exp-current == index ? "\u{2022}  \{choice}"
+                                                         : "         \{choice}";
+                        fg: root.exp-current == index ? root.accent : root.fg;
+                        hi: root.card-hi;
+                        picked => { root.set-expiry(root.exp-id, index); ctx.close(); }
+                    }
+
+                    // Padding belongs on the layout, not the Text - Slint warns and does nothing.
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 8px;
+                        Text {
+                            text: "Replaces the link: the old URL stops working.";
+                            font-size: 10px;
+                            color: root.fg-3;
+                            wrap: word-wrap;
+                        }
                     }
                 }
             }
@@ -695,6 +973,9 @@ export component App inherits Window {
                 if event.text == Key.Escape {
                     ctx.close();
                     settings.close();
+                    exp.close();
+                    // The confirmation is an overlay, so it is dismissed here rather than closed.
+                    root.confirm-kind = 0;
                     return accept;
                 }
                 // Both cases: 1.18 has no String::to-lower-case, and matching only "r" would make
@@ -792,6 +1073,110 @@ export component App inherits Window {
                         font-size: 10px;
                         color: root.fg-3;
                         overflow: elide;
+                    }
+                }
+            }
+        }
+
+        // ---- delete confirmation -------------------------------------------
+        // An overlay, not a PopupWindow: a popup shown from another popup's callback does not
+        // survive the source closing, which is how this dialog refused to appear at all. Fluent
+        // dialogs are overlays anyway, and a modal scrim over a blurred-through window is the
+        // Fluent look rather than an invention.
+        //
+        // Declared last so it paints above everything, including the popups above it.
+        if root.confirm-kind != 0: Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+
+            // The scrim is the Cancel affordance; Escape also works, from the window's key handler.
+            Rectangle {
+                width: 100%; height: 100%;
+                background: #00000059;
+                TouchArea { clicked => { root.confirm-kind = 0; } }
+            }
+
+            Rectangle {
+                width: 300px;
+                height: 156px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: root.stroke;
+                background: root.dark ? #2b2b2b : #ffffff;
+
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 6px;
+
+                    Text {
+                        text: root.confirm-kind == 2 ? "Delete this file?" : "Delete this link?";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: root.fg;
+                    }
+                    Text {
+                        text: root.confirm-name;
+                        font-size: 12px;
+                        color: root.fg-2;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.confirm-kind == 2
+                            ? "The console moves it to trash. It is not erased from the Drive."
+                            : "The link stops working. The file itself stays where it is.";
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        color: root.fg-3;
+                    }
+
+                    Rectangle { vertical-stretch: 1; }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+
+                        Rectangle {
+                            width: 76px; height: 30px;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: root.stroke;
+                            background: cancelta.has-hover ? root.card-hi : root.card;
+                            cancelta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => { root.confirm-kind = 0; }
+                            }
+                            Text {
+                                text: "Cancel";
+                                font-size: 12px;
+                                color: root.fg;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            width: 96px; height: 30px;
+                            border-radius: 6px;
+                            background: root.dark ? #d13438 : #c42b1c;
+                            deleteta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    if root.confirm-kind == 2 { root.delete-file(root.confirm-path); }
+                                    else { root.delete-link(root.confirm-id); }
+                                    root.confirm-kind = 0;
+                                }
+                            }
+                            Text {
+                                text: root.confirm-kind == 2 ? "Delete file" : "Delete link";
+                                font-size: 12px;
+                                color: #ffffff;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
                     }
                 }
             }

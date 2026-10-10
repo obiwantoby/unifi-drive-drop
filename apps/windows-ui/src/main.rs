@@ -932,10 +932,15 @@ fn wire(ui: &App, st: &Arc<State>) {
     });
 
     let s = Arc::clone(st);
+    let w = ui.as_weak();
     ui.on_delete_link(move |id| {
         let s = Arc::clone(&s);
         let Some(c) = s.client.lock().unwrap().clone() else { return };
         let id = id.to_string();
+        // Read the folder before leaving the UI thread, so the refresh afterwards lands on the
+        // directory the user is looking at rather than whatever it became in the meantime.
+        let folder = w.upgrade().map(|u| drive::canonical(&u.get_folder()))
+            .unwrap_or_else(|| "/".into());
         s.tx.send(Msg::Busy(true)).ok();
         std::thread::spawn(move || {
             match c.delete_link(&id) {
@@ -946,6 +951,112 @@ fn wire(ui: &App, st: &Arc<State>) {
                 Err(e) => { let _ = s.tx.send(Msg::Failed(format!("{e}"))); }
             }
             let _ = s.tx.send(Msg::Busy(false));
+            // Without this the deleted row stays on screen until the next Refresh, which is the
+            // same class of bug as an upload that never lists its file: the mutation happened, the
+            // picture says otherwise.
+            load(&s, c, folder);
+        });
+    });
+
+    // Copy an arbitrary string. Used by "copy direct link", which is a different URL from the
+    // share page and the reason the row carries it.
+    let s = Arc::clone(st);
+    ui.on_copy_text(move |text| {
+        let text = text.to_string();
+        let _ = s.tx.send(Msg::Toast(match copy_to_clipboard(&text) {
+            Ok(()) => "Copied".into(),
+            Err(e) => format!("The copy failed: {e}"),
+        }));
+    });
+
+    // Expiry is create-only, so this deletes and recreates: the URL changes, which is worth saying
+    // out loud rather than leaving the user to discover by sharing the old one.
+    let s = Arc::clone(st);
+    let w = ui.as_weak();
+    ui.on_set_expiry(move |id, choice| {
+        let Some(c) = s.client.lock().unwrap().clone() else { return };
+        let id = id.to_string();
+        let Some(ui) = w.upgrade() else { return };
+        let folder = drive::canonical(&ui.get_folder());
+        let idx = usize::try_from(choice.clamp(0, 4)).unwrap_or(2);
+        let exp = drivedrop::models::Expiration::MENU[idx];
+        let label = ["1 hour", "24 hours", "7 days", "30 days", "Never"][idx];
+        s.tx.send(Msg::Busy(true)).ok();
+        let s = Arc::clone(&s);
+        std::thread::spawn(move || {
+            match c.set_expiration(&id, exp) {
+                Ok(n) => {
+                    // The old id no longer resolves. Keeping it in the map would let a row that is
+                    // still on screen copy a dead URL.
+                    {
+                        let mut m = s.by_id.lock().unwrap();
+                        m.remove(&id);
+                        m.insert(n.id.clone(), n);
+                    }
+                    let _ = s.tx.send(Msg::Toast(format!(
+                        "Expires {label} - new link, the old URL is dead")));
+                }
+                Err(e) => { let _ = s.tx.send(Msg::Failed(format!("{e}"))); }
+            }
+            let _ = s.tx.send(Msg::Busy(false));
+            load(&s, c, folder);
+        });
+    });
+
+    // Share a file that has no link yet - the right-click item, and what a left click on an
+    // unshared file does. The copy is deliberate: asking for a link means wanting to paste it.
+    let s = Arc::clone(st);
+    let w = ui.as_weak();
+    ui.on_create_link(move |path| {
+        let Some(c) = s.client.lock().unwrap().clone() else { return };
+        let path = path.to_string();
+        let name = path.rsplit('/').next().unwrap_or("").to_string();
+        let Some(ui) = w.upgrade() else { return };
+        let folder = drive::canonical(&ui.get_folder());
+        let expiry = drivedrop::models::Expiration::MENU
+            [usize::try_from(ui.get_expiry_choice().clamp(0, 4)).unwrap_or(2)];
+        s.tx.send(Msg::Busy(true)).ok();
+        // The handler is FnMut, so the Arc has to be cloned for the thread rather than moved.
+        let s = Arc::clone(&s);
+        std::thread::spawn(move || {
+            match c.create_share(&path, expiry, None) {
+                Ok(link) => {
+                    let copied = link.share_url.as_deref().map(copy_to_clipboard).transpose();
+                    s.by_id.lock().unwrap().insert(link.id.clone(), link.clone());
+                    // `transpose` gives Result<Option<()>, _>: the outer error is the clipboard
+                    // failing, the inner None is the console handing back a link with no URL.
+                    let _ = s.tx.send(Msg::Toast(match copied {
+                        Ok(Some(())) => format!("Linked {name} - link copied"),
+                        Ok(None) => format!("Linked {name} - but the link has no URL to copy"),
+                        Err(e) => format!("Linked {name} - the copy failed: {e}"),
+                    }));
+                }
+                Err(e) => { let _ = s.tx.send(Msg::Failed(format!("{name}: {e}"))); }
+            }
+            let _ = s.tx.send(Msg::Busy(false));
+            load(&s, c, folder);
+        });
+    });
+
+    // Soft delete. The console moves the object to /trash, and the toast says so rather than
+    // saying "deleted", which is a different and unrecoverable thing.
+    let s = Arc::clone(st);
+    let w = ui.as_weak();
+    ui.on_delete_file(move |path| {
+        let Some(c) = s.client.lock().unwrap().clone() else { return };
+        let path = path.to_string();
+        let name = path.rsplit('/').next().unwrap_or("").to_string();
+        let Some(ui) = w.upgrade() else { return };
+        let folder = drive::canonical(&ui.get_folder());
+        s.tx.send(Msg::Busy(true)).ok();
+        let s = Arc::clone(&s);
+        std::thread::spawn(move || {
+            match c.delete_file(&path) {
+                Ok(()) => { let _ = s.tx.send(Msg::Toast(format!("{name} moved to trash"))); }
+                Err(e) => { let _ = s.tx.send(Msg::Failed(format!("{name}: {e}"))); }
+            }
+            let _ = s.tx.send(Msg::Busy(false));
+            load(&s, c, folder);
         });
     });
 
@@ -997,11 +1108,21 @@ fn load(s: &Arc<State>, c: Client, folder: String) {
         Err(e) => { let _ = s.tx.send(Msg::Status(format!("{e}"))); }
     }
 
+    // file_id -> (link id, direct URL). Built from the same fetch as the link rows, so a file's row
+    // and the link list can never disagree about whether something is shared.
+    let mut link_of: HashMap<String, (String, String)> = HashMap::new();
+
     match c.list_links() {
         Ok(links) => {
             {
                 let mut map = s.by_id.lock().unwrap();
-                for l in &links { map.insert(l.id.clone(), l.clone()); }
+                for l in &links {
+                    map.insert(l.id.clone(), l.clone());
+                    link_of.entry(l.file_id.clone()).or_insert_with(|| (
+                        l.id.clone(),
+                        l.direct_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+                    ));
+                }
             }
             // Only this folder's links, which is what makes the folder field mean something. The
             // macOS popover used to list every link on the drive, so a link copied from it had no
@@ -1028,6 +1149,10 @@ fn load(s: &Arc<State>, c: Client, folder: String) {
             name: e.name.clone().into(),
             path: e.path.clone().into(),
             is_dir: e.is_dir,
+            // Which files already have a link decides whether the row offers "create link" or
+            // "copy link", and stops the menu from offering a share that would come back 403.
+            link_id: link_of.get(&e.path).map(|(id, _)| id.clone()).unwrap_or_default().into(),
+            direct: link_of.get(&e.path).map(|(_, d)| d.clone()).unwrap_or_default().into(),
         }).collect();
         let _ = s.tx.send(Msg::Entries(rows));
     }
@@ -1135,11 +1260,36 @@ fn row_for(i: &ShareItem) -> Link {
         (false, Some(e)) => format!("expires {}", e.format("%b %d")),
         (false, None) => "never expires".to_string(),
     };
+    // How soon it goes away, as a tone rather than only words: a row that expires in two hours and
+    // a row that never expires should not read identically.
+    let soon = i.expires_at
+        .map(|e| (e - Utc::now()).num_seconds())
+        .filter(|s| *s > 0 && *s < 86_400);
+    let tone = if expired { 2 } else if soon.is_some() { 1 } else { 0 };
+
+    // Which picker choice produced this link. The console stores an absolute time, so this is
+    // recovered from the link's lifetime and matched loosely; -1 means "none of the five, tick
+    // nothing" rather than guessing and ticking the wrong one.
+    let exp = match (i.expires_at, soon) {
+        (None, _) => 4,
+        (Some(e), _) => {
+            let secs = (e - i.created_at).num_seconds().max(0);
+            [3_600i64, 86_400, 604_800, 2_592_000]
+                .iter()
+                .position(|s| (secs - s).abs() <= (*s as f64 * 0.05) as i64)
+                .map(|p| p as i32)
+                .unwrap_or(-1)
+        }
+    };
+
     Link {
         id: i.id.clone().into(),
         name: i.name.clone().into(),
         subtitle: subtitle.into(),
         live,
+        direct: i.direct_url.as_ref().map(|u| u.to_string()).unwrap_or_default().into(),
+        tone,
+        exp,
     }
 }
 
