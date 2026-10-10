@@ -31,6 +31,20 @@ final class AppModel: ObservableObject {
     /// look at is always what you upload into. Persisted under the original key.
     /// Drive creates missing folders on the first upload (verified), so no mkdir step.
     @AppStorage("uploadFolder") var currentDir: String = "/Public"
+    /// Dock tile on or off. Menu-bar-only is the natural shape for this app, but hiding the
+    /// tile also removes it from ⌘-Tab and Exposé — which is precisely what someone looking
+    /// for the window in Exposé does not want. Opt-in, and default off-equivalent (tile shown).
+    @AppStorage("showDockIcon") var showDockIcon: Bool = true {
+        didSet { applyDockIcon() }
+    }
+
+    /// Applied from `init` as well as `didSet`: the stored choice has to survive relaunch,
+    /// and a policy change only takes effect on the next activation otherwise.
+    func applyDockIcon() {
+        NSApplication.shared.setActivationPolicy(showDockIcon ? .regular : .accessory)
+        if showDockIcon { NSApplication.shared.activate(ignoringOtherApps: true) }
+    }
+
     @AppStorage("defaultExpiration") var defaultExpirationRaw: String = "7d"
     @AppStorage("copyOnUpload") var copyOnUpload: Bool = true
     @AppStorage("allowInvalidCerts") var allowInvalidCerts: Bool = true
@@ -156,6 +170,7 @@ final class AppModel: ObservableObject {
         // minute boundary forever, which is the difference between a menu-bar utility and a
         // battery drain. The countdown it feeds is minute-granular, so nothing notices.
         tick?.tolerance = 60
+        applyDockIcon()
         Task { await bootstrap() }
     }
 

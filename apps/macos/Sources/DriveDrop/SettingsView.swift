@@ -41,6 +41,14 @@ struct SettingsView: View {
                     Toggle("Copy link automatically after upload", isOn: $model.copyOnUpload)
                 }
 
+                Section("Menu bar") {
+                    Toggle("Show the Dock icon", isOn: $model.showDockIcon)
+                    Text(model.showDockIcon
+                         ? "The window is reachable from the Dock tile, ⌘-Tab and Exposé, as well as from the menu bar."
+                         : "Menu bar only. The tile disappears from the Dock, ⌘-Tab and Exposé — use the menu bar's Open Window to get back to the window.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
                 Section {
                     Text("Drive has no API-key access — its file API is per-user, so DriveDrop signs in with a local UniFi OS account and keeps the session cookie. Create a dedicated account with Drive access rather than reusing an admin login.")
                         .font(.caption).foregroundStyle(.secondary)
