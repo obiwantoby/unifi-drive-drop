@@ -9,20 +9,6 @@ struct MenuBarContent: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
-    /// `SettingsLink` silently does nothing inside a `.window`-style `MenuBarExtra`, so drive
-    /// the Settings scene through the responder chain instead. The app must be active first,
-    /// otherwise the action has no responder to land on.
-    private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        // sendAction returns false when nothing in the responder chain handles it, so we can
-        // probe both spellings: SwiftUI renamed it to showSettingsWindow: on macOS 14.
-        DispatchQueue.main.async {
-            for name in ["showSettingsWindow:", "orderFrontPreferencesAlert:"]
-            where NSApp.sendAction(Selector((name)), to: nil, from: nil) { return }
-            model.status = "Could not open Settings"
-        }
-    }
-
     /// Render-time decision, refreshed by the 60 s tick.
     ///
     /// Computed here rather than inline because a `switch` with assignments is not a View, and
@@ -69,176 +55,184 @@ struct MenuBarContent: View {
     }
 
     var body: some View {
-        // Header -------------------------------------------------------------
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.up.forward.square.fill")
-                .foregroundStyle(.tint)
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
-                    Text("DriveDrop").font(.headline)
-                    if !model.ready {
-                        Text("LOADING")
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    } else if model.usingMock {
-                        Text("DEMO")
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(.orange.opacity(0.28), in: Capsule())
-                    }
-                }
-                Text(DrivePath.display(model.currentDir))
-                    .font(.caption2).foregroundStyle(.secondary)
-                if let u = model.usage {
-                    Text("\(Fmt.bytes(u.freeBytes)) free of \(Fmt.bytes(u.totalBytes))")
-                        .font(.caption2).foregroundStyle(.secondary)
-                } else {
-                    Text(model.status.isEmpty ? "…" : model.status)
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
-
-        if let u = model.usage {
-            ProgressView(value: Double(u.usedBytes), total: Double(max(1, u.totalBytes)))
-                .controlSize(.mini).padding(.horizontal, 10)
-        }
-
-        Divider()
-
-        // Links in this folder -----------------------------------------------
-        if shown.isEmpty {
-            Text(model.usingMock
-                 ? "Demo data — sign in to see your links."
-                 : "No share links in this folder yet.")
-                .font(.caption).foregroundStyle(.tertiary)
-                .padding(.horizontal, 10).padding(.vertical, 6)
-        } else {
-            ForEach(ordered) { item in
-              Group {
-                let st = rowState(item)
-
-                Button { model.tap(item) } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: st.live ? "link" : "link.badge.questionmark")
-                            .foregroundStyle(st.live ? Color.primary : Color.secondary)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(item.name).lineLimit(1).font(.callout)
-                            if let c = Fmt.countdown(to: item.expiresAt) {
-                                Text(c).font(.caption2)
-                                    .foregroundStyle(st.live ? Color.secondary : Color.orange)
-                            } else if !st.live {
-                                Text(st.why).font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .opacity(st.live ? 1 : 0.62)
-                // Not `.disabled` — that would hide the refusal from VoiceOver and leave the
-                // click doing nothing at all, which is the bug this replaces.
-                .accessibilityLabel("\(item.name), \(st.why). \(st.live ? "Copies the link" : "Offers actions")")
-                .padding(.horizontal, 10).padding(.vertical, 3)
-
-                // Nothing to copy → ask what the user wants, right here.
-                if let rest = st.offer, model.openRowID == item.id {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(RowTapPolicy.actions(for: rest), id: \.self) { action in
-                            Button {
-                                switch action {
-                                case .reShare:    Task { await model.reShare(item) }
-                                case .retry:
-                                    if let u = item.localPath { Task { await model.upload(u) } }
-                                    model.openRowID = nil
-                                case .dismiss:
-                                    if case .failed = item.phase { model.dismiss(item) }
-                                    model.openRowID = nil
-                                case .openWindow:
-                                    NSApp.activate(ignoringOtherApps: true)
-                                    openWindow(id: "main")
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: actionIcon(action))
-                                    Text(action.title)
-                                    Spacer()
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .font(.caption)
-                            .padding(.horizontal, 26).padding(.vertical, 2)
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+            // Header -------------------------------------------------------------
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.up.forward.square.fill")
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 5) {
+                        Text("DriveDrop").font(.headline)
+                        if !model.ready {
+                            Text("LOADING")
+                                .font(.system(size: 9, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                        } else if model.usingMock {
+                            Text("DEMO")
+                                .font(.system(size: 9, weight: .bold, design: .rounded))
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(.orange.opacity(0.28), in: Capsule())
                         }
                     }
-                    .padding(.bottom, 3)
+                    Text(DrivePath.display(model.currentDir))
+                        .font(.caption2).foregroundStyle(.secondary)
+                    if let u = model.usage {
+                        Text("\(Fmt.bytes(u.freeBytes)) free of \(Fmt.bytes(u.totalBytes))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    } else {
+                        Text(model.status.isEmpty ? "…" : model.status)
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
-              }
-            }
-        }
-
-        // Confirmation. The window has had a toast from the start; the popover never rendered
-        // one, so a copy from the menu bar produced no visible feedback whatsoever — the
-        // diagnostic trail shows the same row tapped five times in a single second, which is
-        // what someone does when nothing tells them it worked.
-        if let toast = model.toast {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text(toast).font(.caption).lineLimit(1)
                 Spacer()
             }
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.green.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
-            .padding(.horizontal, 8)
-            .id(model.toastID)          // re-fire for a repeat of the same message
-            .transition(.opacity)
+            .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
+
+            if let u = model.usage {
+                ProgressView(value: Double(u.usedBytes), total: Double(max(1, u.totalBytes)))
+                    .controlSize(.mini).padding(.horizontal, 10)
+            }
+
+            Divider()
+
+            // Links in this folder -----------------------------------------------
+            if shown.isEmpty {
+                Text(model.usingMock
+                     ? "Demo data — sign in to see your links."
+                     : "No share links in this folder yet.")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+            } else {
+                ForEach(ordered) { item in
+                  Group {
+                    let st = rowState(item)
+
+                    Button { model.tap(item) } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: st.live ? "link" : "link.badge.questionmark")
+                                .foregroundStyle(st.live ? Color.primary : Color.secondary)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(item.name).lineLimit(1).font(.callout)
+                                if let c = Fmt.countdown(to: item.expiresAt) {
+                                    Text(c).font(.caption2)
+                                        .foregroundStyle(st.live ? Color.secondary : Color.orange)
+                                } else if !st.live {
+                                    Text(st.why).font(.caption2).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(st.live ? 1 : 0.62)
+                    // Not `.disabled` — that would hide the refusal from VoiceOver and leave the
+                    // click doing nothing at all, which is the bug this replaces.
+                    .accessibilityLabel("\(item.name), \(st.why). \(st.live ? "Copies the link" : "Offers actions")")
+                    .padding(.horizontal, 10).padding(.vertical, 3)
+
+                    // Nothing to copy → ask what the user wants, right here.
+                    if let rest = st.offer, model.openRowID == item.id {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(RowTapPolicy.actions(for: rest), id: \.self) { action in
+                                Button {
+                                    switch action {
+                                    case .reShare:    Task { await model.reShare(item) }
+                                    case .retry:
+                                        if let u = item.localPath { Task { await model.upload(u) } }
+                                        model.openRowID = nil
+                                    case .dismiss:
+                                        if case .failed = item.phase { model.dismiss(item) }
+                                        model.openRowID = nil
+                                    case .openWindow:
+                                        NSApp.activate(ignoringOtherApps: true)
+                                        openWindow(id: "main")
+                                    }
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: actionIcon(action))
+                                        Text(action.title)
+                                        Spacer()
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .font(.caption)
+                                .padding(.horizontal, 26).padding(.vertical, 2)
+                            }
+                        }
+                        .padding(.bottom, 3)
+                    }
+                  }
+                }
+            }
+
+            if elsewhere > 0 {
+                Text("\(elsewhere) other link\(elsewhere == 1 ? "" : "s") outside this folder")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .padding(.horizontal, 10).padding(.top, 2)
+            }
+
+            Divider()
+
+            // One action, on purpose. This popover does a single job — hand back the link you
+            // just made. Uploading, refreshing and settings belong to the window, and the three
+            // buttons that used to sit here only crowded it: Upload had never worked (it posted
+            // a notification nothing was listening for), and the other two duplicated the window.
+            Button {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "macwindow")
+                    Text("Open Window")
+                    Spacer()
+                    Text("upload · refresh · settings")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10).padding(.vertical, 4)
+
+            Divider()
+
+            // Session lifetime, so "will it die?" is answerable at a glance.
+            HStack {
+                Image(systemName: model.sessionExpires?.timeIntervalSinceNow ?? 0 > 0
+                      ? "checkmark.seal" : "exclamationmark.triangle")
+                    .foregroundStyle(model.sessionExpires == nil ? Color.secondary : Color.green)
+                Text(model.sessionLabel)
+                    .font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+
+            Button("Quit DriveDrop") { NSApp.terminate(nil) }
+                .keyboardShortcut("q")
+                .padding(.bottom, 6)
+                }
+
+            // Same capsule the window uses, floating over the list rather than inserted into
+            // it: an inline banner resized the popover on every copy and made the rows jump.
+            // `.id(toastID)` is what lets a repeat of the same message re-fire the transition.
+            if let toast = model.toast {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text(toast).font(.callout.weight(.medium))
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
+                .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+                .padding(.bottom, 18)
+                .id(model.toastID)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .allowsHitTesting(false)
+            }
         }
-
-        if elsewhere > 0 {
-            Text("\(elsewhere) other link\(elsewhere == 1 ? "" : "s") outside this folder")
-                .font(.caption2).foregroundStyle(.tertiary)
-                .padding(.horizontal, 10).padding(.top, 2)
-        }
-
-        Divider()
-
-        // Actions ------------------------------------------------------------
-        Button("Upload Files…") {
-            NSApp.activate(ignoringOtherApps: true)
-            NotificationCenter.default.post(name: .drivedropPickFiles, object: nil)
-        }
-        .keyboardShortcut("o")
-
-        Button("Open Window") {
-            NSApp.activate(ignoringOtherApps: true)
-            openWindow(id: "main")
-        }
-
-        Button("Refresh") { Task { await model.refresh() } }
-            .keyboardShortcut("r")
-            .disabled(model.isBusy)
-
-        Button("Settings…") { openSettings() }
-            .keyboardShortcut(",", modifiers: .command)
-
-        Divider()
-
-        // Session lifetime, so "will it die?" is answerable at a glance.
-        HStack {
-            Image(systemName: model.sessionExpires?.timeIntervalSinceNow ?? 0 > 0
-                  ? "checkmark.seal" : "exclamationmark.triangle")
-                .foregroundStyle(model.sessionExpires == nil ? Color.secondary : Color.green)
-            Text(model.sessionLabel)
-                .font(.caption2).foregroundStyle(.secondary)
-            Spacer()
-        }
-        .padding(.horizontal, 10)
-
-        Button("Quit DriveDrop") { NSApp.terminate(nil) }
-            .keyboardShortcut("q")
-            .padding(.bottom, 6)
-    }
+        .animation(.spring(duration: 0.3, bounce: 0.25), value: model.toastID)
+}
 }

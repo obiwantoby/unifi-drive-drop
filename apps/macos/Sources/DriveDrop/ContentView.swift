@@ -39,6 +39,11 @@ struct ContentView: View {
             return true
         }
         .preferredColorScheme(.dark)
+        // ⌘O and the menu's "Choose Files…" both post this. Until now nothing subscribed, so
+        // the shortcut did nothing at all while the drop area's own click handler worked fine.
+        .onReceive(NotificationCenter.default.publisher(for: .drivedropPickFiles)) { _ in
+            pickFiles()
+        }
         .animation(.spring(duration: 0.3, bounce: 0.25), value: model.toastID)
         .animation(.spring(duration: 0.3, bounce: 0.25), value: model.isDropTargeted)
         .confirmationDialog("Delete this share?", isPresented: .init(
