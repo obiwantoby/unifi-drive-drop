@@ -1,7 +1,8 @@
 # How the Drive API was reverse-engineered
 
 Narrative + method. **The endpoint reference lives in [`spec/api.md`](../spec/api.md).**
-Raw captured responses are in [`spec/raw/`](../spec/raw/).
+No raw captures are published: a console response carries hostname, MACs, serials and account
+records. Everything needed to re-implement a client is in [`spec/api.md`](../spec/api.md).
 
 Target: `https://<REDACTED-IP>` — UNAS Pro, UniFi OS 4.0.4, Drive controller 4.4.9.
 

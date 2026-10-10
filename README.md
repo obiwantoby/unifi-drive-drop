@@ -12,7 +12,7 @@ copy the URL, open it, set an expiration, or delete it.
 
 ## Download
 
-**macOS 14+ (Apple Silicon or Intel)** → **[latest release](https://github.com/exampleuser/unifi-drive-drop/releases/latest)**
+**macOS 14+ (Apple Silicon or Intel)** → **[latest release](https://github.com/***REMOVED***/unifi-drive-drop/releases/latest)**
 — `DriveDrop-<version>.dmg`, with `SHA256SUMS` alongside.
 
 The build is **ad-hoc signed and not notarized** (no Apple Developer ID), so Gatekeeper will
@@ -44,9 +44,9 @@ unifi-drive-drop/
 │   └── design.md           UI spec for both platforms
 ├── spec/
 │   ├── api.md              the Drive endpoints each client implements
-│   └── raw/                captured responses from discovery runs
+│   └── discovery.md        how those endpoints were found, and what was ruled out
 ├── tools/
-│   └── discover.py         login + crawl the console, dump spec/raw/discovery.json
+│   └── redact_capture.py   scrubber; run it before committing anything console-derived
 └── apps/
     ├── macos/              Swift package  -> DriveDrop.app
     └── windows/            cargo project  -> drivedrop.exe (Mica)
@@ -83,7 +83,7 @@ The Windows client is Rust, not a port of the Swift one — it shares nothing bu
 ```powershell
 winget install Rustlang.Rustup          # once
 
-git clone https://github.com/exampleuser/unifi-drive-drop
+git clone https://github.com/***REMOVED***/unifi-drive-drop
 cd unifi-drive-drop\apps\windows-ui
 cargo build --release                   # target\release\drivedrop-ui.exe
 
@@ -121,15 +121,14 @@ So DriveDrop signs in the way the Drive web UI does (`POST /api/auth/login`, kee
 `TOKEN` cookie, mirror `X-Csrf-Token`).
 
 Recommended: create a dedicated local UniFi OS account with Drive access rather than
-reusing an admin login. Re-run discovery any time with:
+reusing an admin login.
 
-```bash
-cd unifi-drive-drop
-python3 tools/discover.py            # read-only crawl → spec/raw/discovery.json
-```
-
-Credentials come from `UNIFI_USER` / `UNIFI_PASS` or a prompt; only the session `TOKEN` is
-written to disk (`.token`, chmod 600, gitignored).
+Discovery artifacts are **not published**. A captured console response carries your hostname, MAC
+addresses, drive serials, account records and file paths — everything that identifies you and your
+network — and none of it is needed once the endpoints are written down. `spec/api.md` is the
+product; the captures that produced it were deleted rather than scrubbed, because scrubbing is a
+game where every new field in a future firmware release is a new leak. If you re-derive any of this
+against your own console, keep the output out of the repo.
 
 ## Security notes
 

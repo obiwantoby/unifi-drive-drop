@@ -27,11 +27,14 @@ binary search.
 UniFi OS portal HTML. A 510-byte body means the Drive SPA shell. Size separates the two when
 both are HTTP 200.
 
-**Proxy and log.** `tools/capture_proxy.py` sat between the Drive web UI and the console and
-recorded real requests. The upload contract, the chunk size and the `checksum` field all came
-from a capture of the official UI doing the thing we could not make work.
+**Proxy and log.** A local proxy sat between the Drive web UI and the console and recorded real
+requests. The upload contract, the chunk size and the `checksum` field all came from a capture of
+the official UI doing the thing we could not make work. Those captures are no longer kept — a
+console response carries hostname, MAC addresses, serials and account records, which is everything
+that identifies a person and none of what a client needs. `api.md` is the product.
 
-`tools/discover.py` automates the oracle sweep.
+An oracle sweep automates endpoint enumeration: log in, request a candidate path, classify by
+status and body size. It is not shipped here, because the sweep's *output* is the thing that leaks.
 
 ---
 

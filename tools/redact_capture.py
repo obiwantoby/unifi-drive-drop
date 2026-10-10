@@ -159,7 +159,7 @@ def scrub(text: str, suffix: str) -> tuple[str, int]:
 # how the escaped-quote bug survived a full scrub pass.
 FIXTURES: list[tuple[str, str, list[str]]] = [
     # (suffix, input, substrings that MUST appear in the output)
-    (".jsonl", r'{"username":"***REMOVED***","password":"hunter2"}',
+    (".jsonl", r'{"username":"someone","password":"hunter2"}',
      ['"password":"<REDACTED>"']),
     (".jsonl", r'"preview": "{\"username\":\"b\",\"password\":\"hunter2\"}"',
      ['<REDACTED>']),
@@ -189,13 +189,16 @@ FIXTURES: list[tuple[str, str, list[str]]] = [
     (".md", '"password": "optional"', ['"password": "optional"']),
     # Identity shapes. Every one of these was present in a public repo while --check reported
     # clean, because the table only ever held names and mailboxes.
-    (".json", '"mac": "***REMOVED***"', ['"mac": "<REDACTED-MAC>"']),
+    # Packed form, keyed. Locally-administered (02:) so it is unambiguously synthetic — fixtures
+    # must never hold a real-looking identifier, because --replace-text has no notion of the SKIP
+    # list and rewrote these very lines into ***REMOVED***, leaving the rules untestable.
+    (".json", '"mac": "021122334455"', ['"mac": "<REDACTED-MAC>"']),
     # The nested form, which is the one that actually appears in capture files. Written without Q
     # these rules fired on the tidy fixtures and missed every real record.
     (".jsonl", r'{"resp": "{\"mac\":\"AABBCCDDEEFF\"}"}', ['<REDACTED-MAC>']),
     (".jsonl", r'{"resp": "{\"username\":\"someone\"}"}', ['<REDACTED-USER>']),
     (".jsonl", r'{"resp": "{\"serial\":\"ABC12DEF\"}"}', ['<REDACTED-SERIAL>']),
-    (".json", '"mac": "***REMOVED***"', ['"mac": "<REDACTED-MAC>"']),
+    (".json", '"mac": "02:11:22:33:44:55"', ['"mac": "<REDACTED-MAC>"']),
     (".json", '"serial": "ABC12DEF"', ['"serial": "<REDACTED-SERIAL>"']),
     (".json", '"hostname": "MyCleverDevice"', ['"hostname": "<REDACTED-HOSTNAME>"']),
     (".json", '"username": "someoperator"', ['"username": "<REDACTED-USER>"']),
