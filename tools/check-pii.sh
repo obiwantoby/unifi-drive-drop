@@ -68,6 +68,9 @@ rules() {
   # 5. Someone's home directory.
   while IFS=: read -r f line rest; do
     [ -z "$f" ] && continue
+    # Including itself: the selftest below plants a personal-path fixture, which is the rule's own
+    # bait and not a leak. Every other rule already skips these two files for the same reason.
+    echo "$f" | grep -qE "^($SKIP_PATHS)$" && continue
     echo "personal Windows path|$f:$line"
   done < <(git grep -nIE '[Cc]:[\\/]+[Uu]sers[\\/]+[A-Za-z0-9._-]+' -- . 2>/dev/null)
 }

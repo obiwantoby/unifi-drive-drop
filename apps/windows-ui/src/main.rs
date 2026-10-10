@@ -16,12 +16,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use slint::{Model, ModelRc, VecModel};
 use drivedrop::api::MockClient;
-use drivedrop::{DriveClient, Expiration, LiveClient, ShareItem};
+use drivedrop::{DriveClient, LiveClient, ShareItem};
 
 type Client = Arc<dyn DriveClient + Send + Sync>;
 
@@ -138,10 +138,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tray = Tray::new().expect("failed to create the tray");
     wire_tray(&ui, &tray);
 
-    // Closing the window hides it to the tray, like the macOS menu-bar app, and Quit lives in the
-    // tray menu. That is Slint's default close behaviour (HideWindow), so there is no
-    // on_close_requested here. The run loop only survives the last window because a visible tray
-    // counts as a top level — see the note in tray.rs's place in main.slint.
+    apply_settings(&ui);
+    wire_settings(&ui);
+
+    // Closing the window hides it to the tray, like the macOS menu-bar app, with Quit in the tray
+    // menu — unless "Close button hides to tray" is off, in which case close means quit. Slint's
+    // default is HideWindow either way, so the setting is what the handler reads at click time
+    // rather than something wired once at start-up.
+    let close_sink = ui.as_weak();
+    // On the *window*, not on the component: `App` has no close handler of its own.
+    ui.window().on_close_requested(move || match close_sink.upgrade() {
+        Some(ui) if ui.get_close_to_tray() => slint::CloseRequestResponse::HideWindow,
+        _ => {
+            let _ = slint::quit_event_loop();
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
+
+    // Started from the Run key: arrive in the tray instead of dropping a window on the desktop.
+    if std::env::args().any(|a| a == autostart::HIDDEN_ARG) {
+        let _ = ui.window().hide();
+    }
 
     let (tx, rx) = channel::<Msg>();
     let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), tx });
@@ -152,6 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // looks steppy and far below anything that costs noticeable power when idle.
     let sink = ui.as_weak();
     let drain = rx;
+    let clock = std::rc::Rc::new(std::cell::RefCell::<ToastClock>::default());
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
@@ -159,7 +177,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         move || {
             let Some(ui) = sink.upgrade() else { return };
             while let Ok(m) = drain.try_recv() {
-                apply(&ui, m);
+                apply(&ui, m, &clock);
+            }
+            // Two deadlines rather than one: hide starts the 200 ms fade, and the text is only
+            // cleared once that fade is over — clearing it immediately drains the card mid-fade
+            // and the message visibly blanks out on its way off screen.
+            {
+                let mut c = clock.borrow_mut();
+                let now = Instant::now();
+                if c.hide_at.is_some_and(|t| now >= t) {
+                    ui.set_toast_visible(false);
+                    c.hide_at = None;
+                    c.clear_at = Some(now + Duration::from_millis(220));
+                }
+                if c.clear_at.is_some_and(|t| now >= t) {
+                    ui.set_toast("".into());
+                    c.clear_at = None;
+                }
             }
             // The tray reports the same numbers as the window, so it is refreshed from the place
             // that applies console results. The two cannot disagree if there is one writer.
@@ -433,6 +467,298 @@ fn apply_backdrop(ui: &App) -> bool {
 
 // MARK: - callbacks
 
+/// User settings.
+///
+/// Four values, so a line-oriented file rather than a serde dependency: `key=value`, one per line,
+/// unknown keys ignored, unreadable file means defaults. That last part matters — a settings file
+/// must never be able to stop the app starting, and a half-written one must not silently reset
+/// people's choices to defaults either, so `save` writes a temp file and renames.
+///
+/// Nothing here is secret: no host, no username, no token. Same rule as the repo — a file that
+/// syncs through OneDrive must not be a credential store.
+mod settings {
+    use std::path::PathBuf;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Settings {
+        pub expiry_choice: i32,
+        pub copy_on_upload: bool,
+        pub close_to_tray: bool,
+        pub accept_self_signed: bool,
+    }
+
+    impl Default for Settings {
+        fn default() -> Self {
+            Self { expiry_choice: 2, copy_on_upload: true, close_to_tray: true,
+                   accept_self_signed: true }
+        }
+    }
+
+    pub fn path() -> PathBuf {
+        let root = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        root.join("DriveDrop").join("settings.cfg")
+    }
+
+    /// Tolerant by design. A corrupt line is skipped, not fatal, and the rest still applies.
+    pub fn parse(text: &str) -> Settings {
+        let mut s = Settings::default();
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            match k.trim() {
+                "expiry-choice" => {
+                    if let Ok(n) = v.trim().parse::<i32>() {
+                        // Clamp rather than reject: an out-of-range index would panic at use.
+                        s.expiry_choice = n.clamp(0, 4);
+                    }
+                }
+                "copy-on-upload" => s.copy_on_upload = v.trim() == "true",
+                "close-to-tray" => s.close_to_tray = v.trim() == "true",
+                "accept-self-signed" => s.accept_self_signed = v.trim() == "true",
+                _ => {}
+            }
+        }
+        s
+    }
+
+    pub fn render(s: &Settings) -> String {
+        format!("expiry-choice={}\ncopy-on-upload={}\nclose-to-tray={}\naccept-self-signed={}\n",
+                s.expiry_choice, s.copy_on_upload, s.close_to_tray, s.accept_self_signed)
+    }
+
+    pub fn load() -> Settings {
+        parse(&std::fs::read_to_string(path()).unwrap_or_default())
+    }
+
+    pub fn save(s: &Settings) -> std::io::Result<()> {
+        let p = path();
+        if let Some(dir) = p.parent() { std::fs::create_dir_all(dir)?; }
+        let tmp = p.with_extension("cfg.tmp");
+        std::fs::write(&tmp, render(s))?;
+        // rename over the target: either the old file or the new one, never a truncated middle.
+        std::fs::rename(&tmp, &p)
+    }
+}
+
+/// Launch at sign-in.
+///
+/// Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, the per-user key that needs no
+/// elevation and that Task Manager's Startup tab manages. macOS login items are a different
+/// mechanism entirely, so this reports "unsupported" there and the checkbox hides itself rather
+/// than sitting there promising something nothing implements.
+///
+/// The command line carries `--hidden`: an app that lives in the tray should arrive in the tray,
+/// not drop a window on the desktop every time you log in.
+mod autostart {
+    pub const HIDDEN_ARG: &str = "--hidden";
+
+    pub fn supported() -> bool {
+        cfg!(windows)
+    }
+
+    #[cfg(windows)]
+    mod imp {
+        use windows::core::{HSTRING, PCWSTR};
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+            HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SAM_FLAGS, REG_SZ,
+        };
+
+        const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        const VALUE_NAME: &str = "DriveDrop";
+
+        // These entry points return WIN32_ERROR rather than Result, so `.ok()` is what turns a
+        // zero into Ok(()).
+        fn key(sam: REG_SAM_FLAGS) -> Result<HKEY, String> {
+            unsafe {
+                let sub = HSTRING::from(RUN_KEY);
+                let mut h = HKEY::default();
+                RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sub.as_ptr()), 0, sam, &mut h)
+                    .ok()
+                    .map_err(|e| format!("open Run key: {e}"))?;
+                Ok(h)
+            }
+        }
+
+        /// Closing is best-effort: the handle is ours, we are finished with it, and a failure here
+        /// must not swallow the result of the call that actually mattered.
+        fn close(h: HKEY) { let _ = unsafe { RegCloseKey(h) }; }
+
+        /// What we would write. Quoted, because the install path can contain a space and the Run key
+        /// is parsed like a command line rather than an argument list. (Written without an example
+        /// path: `tools/check-pii.sh` fails the build on a personal-path shape, and a placeholder
+        /// that looks like one is indistinguishable from the real thing to a regex.)
+        fn command() -> String {
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            format!("\"{exe}\" {}", super::HIDDEN_ARG)
+        }
+
+        pub fn is_enabled() -> bool {
+            let Ok(h) = key(KEY_QUERY_VALUE) else { return false };
+            let name = HSTRING::from(VALUE_NAME);
+            let mut len: u32 = 0;
+            let mut kind = REG_SZ;
+            unsafe {
+                let r = RegQueryValueExW(h, PCWSTR(name.as_ptr()), None, Some(&mut kind), None, Some(&mut len));
+                close(h);
+                r.is_ok()
+            }
+        }
+
+        pub fn set(enabled: bool) -> Result<(), String> {
+            let name = HSTRING::from(VALUE_NAME);
+            if enabled {
+                let h = key(KEY_SET_VALUE)?;
+                // REG_SZ is UTF-16LE with a terminating NUL. `str::as_bytes()` stores UTF-8 and
+                // Windows reads it back as code units: the value looks plausible in an editor and
+                // is garbage to the loader, so autostart silently never happens. Only reading the
+                // value back shows this — hence tools/check-autostart.ps1.
+                let data = command();
+                let utf16: Vec<u16> = data.encode_utf16().chain(std::iter::once(0)).collect();
+                let bytes: &[u8] = unsafe {
+                    std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2)
+                };
+                let r = unsafe {
+                    // The slice carries the length; there is no separate cbdata argument.
+                    let r = RegSetValueExW(h, PCWSTR(name.as_ptr()), 0, REG_SZ, Some(bytes));
+                    close(h);
+                    r
+                };
+                r.ok().map_err(|e| format!("write Run key: {e}"))?;
+                Ok(())
+            } else {
+                let h = key(KEY_SET_VALUE)?;
+                let r = unsafe {
+                    let r = RegDeleteValueW(h, PCWSTR(name.as_ptr()));
+                    close(h);
+                    r
+                };
+                // Already absent is the state that was asked for, not an error.
+                const ERROR_FILE_NOT_FOUND: u32 = 2;
+                if r.0 == ERROR_FILE_NOT_FOUND { return Ok(()); }
+                // WIN32_ERROR has no Display; `.ok()` converts it to the error type that does.
+                r.ok().map_err(|e| format!("delete Run key: {e}"))?;
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn is_enabled() -> bool { imp::is_enabled() }
+    #[cfg(windows)]
+    pub fn set(enabled: bool) -> Result<(), String> { imp::set(enabled) }
+
+    #[cfg(not(windows))]
+    pub fn is_enabled() -> bool { false }
+    #[cfg(not(windows))]
+    pub fn set(_enabled: bool) -> Result<(), String> {
+        Err("login items are not implemented on this platform".into())
+    }
+}
+
+/// Set while the settings are being pushed *into* the UI at start-up, so the change handlers do
+/// not write the file back (and, for demo-on, do not sign in on the first frame).
+static APPLYING_SETTINGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn current_settings(ui: &App) -> settings::Settings {
+    settings::Settings {
+        expiry_choice: ui.get_expiry_choice().clamp(0, 4),
+        copy_on_upload: ui.get_copy_on_upload(),
+        close_to_tray: ui.get_close_to_tray(),
+        accept_self_signed: ui.get_insecure(),
+    }
+}
+
+fn open_in_browser(url: &str) -> Result<(), String> {
+    // `explorer <url>` rather than `cmd /C start`: no shell quoting to get wrong, and no window
+    // flashing. Only spawn — waiting on explorer is documented to hang or return odd statuses.
+    #[cfg(windows)]
+    let mut cmd = { let mut c = std::process::Command::new("explorer"); c.arg(url); c };
+    #[cfg(target_os = "macos")]
+    let mut cmd = { let mut c = std::process::Command::new("open"); c.arg(url); c };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut cmd = { let mut c = std::process::Command::new("xdg-open"); c.arg(url); c };
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Push the stored values into the UI without triggering the save handlers.
+fn apply_settings(ui: &App) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let cfg = settings::load();
+    APPLYING_SETTINGS.store(true, Relaxed);
+    ui.set_expiry_choice(cfg.expiry_choice);
+    ui.set_copy_on_upload(cfg.copy_on_upload);
+    ui.set_close_to_tray(cfg.close_to_tray);
+    ui.set_insecure(cfg.accept_self_signed);
+    // Show %APPDATA%\DriveDrop\settings.cfg rather than the expanded path. It is shorter, it is
+    // what you would type, and it keeps the operator's Windows username out of every screenshot
+    // of this panel — the same reason the repo forbids personal paths.
+    let full = settings::path().display().to_string();
+    let shown = match std::env::var("APPDATA") {
+        Ok(a) if full.starts_with(&a) => format!("%APPDATA%{}", &full[a.len()..]),
+        _ => full,
+    };
+    ui.set_settings_path(shown.into());
+    // Read from the registry, not from the file: the Run key is the truth about autostart, and it
+    // can be changed outside this app (Task Manager's Startup tab) at any time.
+    ui.set_can_autostart(autostart::supported());
+    ui.set_autostart(autostart::is_enabled());
+    APPLYING_SETTINGS.store(false, Relaxed);
+}
+
+/// Every settings control writes through here. One place, so "why did my choice not stick?" has
+/// one answer.
+fn wire_settings(ui: &App) {
+    let persist = |ui: &App| {
+        if APPLYING_SETTINGS.load(std::sync::atomic::Ordering::Relaxed) { return; }
+        let _ = settings::save(&current_settings(ui));
+    };
+
+    let w = ui.as_weak();
+    ui.on_settings_changed(move || {
+        if let Some(ui) = w.upgrade() { persist(&ui); }
+    });
+
+    // Demo is not persisted (it is a viewing mode, not a preference), but the box has to drive the
+    // same code paths the sign-in card does, or the two disagree about what "demo" means.
+    let w = ui.as_weak();
+    ui.on_set_demo_mode(move |on| {
+        let Some(ui) = w.upgrade() else { return };
+        if on && !ui.get_demo() {
+            ui.invoke_sign_in("".into(), "".into(), "".into(), ui.get_insecure());
+        } else if !on && ui.get_signed_in() {
+            ui.invoke_sign_out();
+        }
+    });
+
+    // Autostart is not in settings.cfg on purpose: the Run key *is* the store, and a second copy
+    // here would be a second truth that Task Manager's Startup tab does not know about.
+    let w = ui.as_weak();
+    ui.on_set_autostart(move |on| {
+        let Some(ui) = w.upgrade() else { return };
+        match autostart::set(on) {
+            Ok(()) => {
+                ui.set_toast(if on {
+                    "Will start with Windows, in the tray".into()
+                } else {
+                    "Won't start with Windows".into()
+                });
+                ui.set_toast_visible(true);
+            }
+            // Put the box back: a checkbox that stays ticked after the registry write failed is a
+            // lie about the state of the machine.
+            Err(e) => {
+                ui.set_autostart(!on);
+                ui.set_status(format!("could not change autostart: {e}").into());
+            }
+        }
+    });
+}
+
 fn wire(ui: &App, st: &Arc<State>) {
     let s = Arc::clone(st);
     let w = ui.as_weak();
@@ -521,8 +847,9 @@ fn wire(ui: &App, st: &Arc<State>) {
             .set_title(format!("Upload to {folder}"))
             .pick_files()
         else { return };
+        let copy = w.upgrade().map(|u| u.get_copy_on_upload()).unwrap_or(true);
         for p in paths {
-            upload_one(&s, p, folder.clone());
+            upload_one(&s, p, folder.clone(), copy);
         }
     });
 
@@ -541,10 +868,29 @@ fn wire(ui: &App, st: &Arc<State>) {
     });
 
     let s = Arc::clone(st);
+    let w2 = ui.as_weak();
+    ui.on_open_link(move |id| {
+        let item = s.by_id.lock().unwrap().get(id.as_str()).cloned();
+        match item.and_then(|i| i.share_url) {
+            Some(u) => {
+                let _ = match open_in_browser(u.as_str()) {
+                    Ok(()) => s.tx.send(Msg::Toast("Opened in the browser".into())),
+                    Err(e) => s.tx.send(Msg::Failed(format!("could not open the browser: {e}"))),
+                };
+            }
+            None => { let _ = s.tx.send(Msg::Status("That row has no share URL".into())); }
+        }
+    });
+
+    let s = Arc::clone(st);
     ui.on_re_share(move |id| {
         // Cloned per invocation: the outer callback is FnMut, so moving `s` into the thread
         // would consume it on the first click and break every later one.
         let s = Arc::clone(&s);
+        // Read the chosen expiry on the UI thread: the worker below has no UI access.
+        let choice = w2.upgrade().map(|u| u.get_expiry_choice()).unwrap_or(2);
+        let expiry = drivedrop::models::Expiration::MENU
+            [usize::try_from(choice.clamp(0, 4)).unwrap_or(2)];
         let (Some(c), Some(item)) = (s.client.lock().unwrap().clone(),
                                      s.by_id.lock().unwrap().get(id.as_str()).cloned())
         else { return };
@@ -554,7 +900,7 @@ fn wire(ui: &App, st: &Arc<State>) {
             // token. Offered only for expired or unshared rows, where the old URL is already
             // dead or does not exist.
             let _ = c.delete_link(&item.id);
-            match c.create_share(&item.file_id, Expiration::SevenDays, None) {
+            match c.create_share(&item.file_id, expiry, None) {
                 Ok(n) => {
                     let _ = s.tx.send(Msg::Toast("New link created — the old URL no longer works".into()));
                     let _ = s.tx.send(Msg::Status(String::new()));
@@ -591,8 +937,29 @@ fn wire(ui: &App, st: &Arc<State>) {
     let s = Arc::clone(st);
     let w = ui.as_weak();
     ui.on_sign_out(move || {
-        if let Some(ui) = w.upgrade() { ui.set_signed_in(false); }
         *s.client.lock().unwrap() = None;
+        s.by_id.lock().unwrap().clear();
+        if let Some(ui) = w.upgrade() {
+            ui.set_signed_in(false);
+            // Everything the previous session put on screen goes with it. A screenshot of this
+            // bug showed "not connected" next to the DEMO badge, a full usage bar and two live
+            // rows — which reads as "still connected, label is wrong", the worst possible
+            // confusion for a tool that shows where your files are.
+            ui.set_links(ModelRc::from(std::rc::Rc::new(VecModel::<Link>::default())));
+            ui.set_entries(ModelRc::from(std::rc::Rc::new(VecModel::<Entry>::default())));
+            ui.set_elsewhere(0);
+            ui.set_usage_text("".into());
+            ui.set_usage_fraction(0.0);
+            ui.set_session("".into());
+            ui.set_demo(false);
+            ui.set_status("".into());
+            ui.set_toast_visible(false);
+            ui.set_toast("".into());
+            // The demo checkbox drives sign-in/out, so leaving the session has to clear it —
+            // otherwise it sits ticked with nothing ticked behind it, and the next click reads as
+            // "already on" and does nothing.
+            ui.set_demo_on(false);
+        }
     });
 }
 
@@ -653,7 +1020,7 @@ fn load(s: &Arc<State>, c: Client, folder: String) {
     let _ = s.tx.send(Msg::Busy(false));
 }
 
-fn upload_one(s: &Arc<State>, path: PathBuf, folder: String) {
+fn upload_one(s: &Arc<State>, path: PathBuf, folder: String, copy_after: bool) {
     let Some(c) = s.client.lock().unwrap().clone() else { return };
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let tx = s.tx.clone();
@@ -667,7 +1034,18 @@ fn upload_one(s: &Arc<State>, path: PathBuf, folder: String) {
         match c.upload(&path, &folder, &cb) {
             Ok(item) => {
                 let _ = tx.send(Msg::Uploaded);
-                let _ = tx.send(Msg::Toast(format!("Shared {}", item.name)));
+                // The preference is "copy the link", not "mention the link": the point is to paste
+                // it somewhere, so doing it silently is the feature. When there is no URL, say so
+                // instead of reporting a share that cannot be opened.
+                let toast = match (copy_after, item.share_url.as_deref()) {
+                    (true, Some(u)) => match copy_to_clipboard(u) {
+                        Ok(()) => format!("Shared {} — link copied", item.name),
+                        Err(e) => format!("Shared {}, but the copy failed: {e}", item.name),
+                    },
+                    (true, None) => format!("Uploaded {}, no share URL to copy", item.name),
+                    _ => format!("Shared {}", item.name),
+                };
+                let _ = tx.send(Msg::Toast(toast));
             }
             Err(e) => {
                 let _ = tx.send(Msg::Uploaded);
@@ -706,12 +1084,33 @@ fn row_for(i: &ShareItem) -> Link {
 
 // MARK: - ui updates (UI thread only)
 
-fn apply(ui: &App, m: Msg) {
+/// When the toast should fade out, and when its text should be released afterwards.
+#[derive(Default)]
+struct ToastClock {
+    hide_at: Option<Instant>,
+    clear_at: Option<Instant>,
+}
+
+const TOAST_LIFE: Duration = Duration::from_millis(2200);
+
+fn apply(ui: &App, m: Msg, clock: &std::cell::RefCell<ToastClock>) {
     match m {
         Msg::Busy(b) => ui.set_busy(b),
-        // A status change clears a stale toast, so the two never fight over one line.
-        Msg::Status(s) => { ui.set_toast("".into()); ui.set_status(s.into()); }
-        Msg::Toast(t) => ui.set_toast(t.into()),
+        // A status change dismisses the toast rather than competing with it.
+        Msg::Status(s) => {
+            ui.set_toast_visible(false);
+            ui.set_toast("".into());
+            clock.borrow_mut().hide_at = None;
+            clock.borrow_mut().clear_at = None;
+            ui.set_status(s.into());
+        }
+        Msg::Toast(t) => {
+            ui.set_toast(t.into());
+            ui.set_toast_visible(true);
+            let mut c = clock.borrow_mut();
+            c.hide_at = Some(Instant::now() + TOAST_LIFE);
+            c.clear_at = None;
+        }
         Msg::Failed(e) => { ui.set_toast("".into()); ui.set_status(e.into()); ui.set_upload_progress(-1.0); }
         Msg::Session(s) => ui.set_session(s.into()),
         Msg::Usage { text, fraction } => {
@@ -726,6 +1125,9 @@ fn apply(ui: &App, m: Msg) {
         Msg::SignedIn { demo } => {
             ui.set_signed_in(true);
             ui.set_demo(demo);
+            // Keep the settings checkbox truthful when demo mode is entered from the sign-in card
+            // rather than from the checkbox itself.
+            ui.set_demo_on(demo);
         }
     }
 }
@@ -746,4 +1148,39 @@ fn human(n: i64) -> String {
     while v >= 1000.0 && u < UNITS.len() - 1 { v /= 1024.0; u += 1; }
     let s = if v < 10.0 { format!("{v:.1}") } else { format!("{v:.0}") };
     format!("{}{} {}", if neg { "-" } else { "" }, s, UNITS[u])
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::settings::{parse, render, Settings};
+
+    #[test]
+    fn round_trips() {
+        let s = Settings {
+            expiry_choice: 4,
+            copy_on_upload: false,
+            close_to_tray: false,
+            accept_self_signed: true,
+        };
+        assert_eq!(parse(&render(&s)), s, "what we write must be what we read");
+    }
+
+    #[test]
+    fn missing_file_is_defaults_not_crash() {
+        assert_eq!(parse(""), Settings::default());
+    }
+
+    #[test]
+    fn junk_lines_are_skipped_and_good_ones_still_apply() {
+        // A half-written or hand-edited file must not lose the settings that are readable.
+        let s = parse("# comment\ngarbage\nexpiry-choice=\ncopy-on-upload=false\nexpiry-choice=1\n");
+        assert!(!s.copy_on_upload, "an explicit false must beat the default true");
+        assert_eq!(s.expiry_choice, 1);
+    }
+
+    #[test]
+    fn out_of_range_expiry_clamps_instead_of_panicking_at_use() {
+        assert_eq!(parse("expiry-choice=99").expiry_choice, 4);
+        assert_eq!(parse("expiry-choice=-7").expiry_choice, 0);
+    }
 }

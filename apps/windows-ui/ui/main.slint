@@ -22,7 +22,43 @@ export struct Entry {
     is-dir: bool,
 }
 
+/// One row of the context menu. Hover and enable are per row; the popup is its own top level, so
+/// the palette is handed in rather than reached through the window's root bindings.
+///
+/// Declared before `App`, which is where it is used: Slint 1.18 reports a component defined later
+/// in the file as "Unknown element" at the use site.
+component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <color> fg;
+    in property <color> hi;
+    in property <bool> dim: false;
+    callback picked();
+
+    height: 30px;
+    border-radius: 6px;
+    background: ta.has-hover && !root.dim ? root.hi : transparent;
+
+    ta := TouchArea {
+        enabled: !root.dim;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.picked(); }
+    }
+
+    Text {
+        text: root.label;
+        font-size: 12px;
+        // Opacity rather than a second colour: the caller passes one foreground and the disabled
+        // state is the same 45% in both themes.
+        opacity: root.dim ? 0.45 : 1.0;
+        vertical-alignment: center;
+        x: 10px;
+    }
+}
+
 export component App inherits Window {
+    // Initial focus goes to the key handler so Escape and the chords work before the user clicks
+    // anything; clicking a field still moves focus as usual.
+    forward-focus: keys;
     title: "DriveDrop";
     preferred-width: 460px;
     preferred-height: 640px;
@@ -83,6 +119,49 @@ export component App inherits Window {
     callback copy-link(id: string);
     callback re-share(id: string);
     callback delete-link(id: string);
+    callback open-link(id: string);
+
+    // ---- settings -----------------------------------------------------------
+    // Two-way so the panel can show what is already chosen; Rust observes the changes and writes
+    // them to %APPDATA%\DriveDrop\settings.json. They are plain values rather than an enum because
+    // the index is also what the picker buttons compare against.
+    //
+    // | index | expiry   |    | persisted | applied |
+    // |-------|----------|----|-----------|---------|
+    // | 0     | 1 hour   |    | all       | immediately, except self-signed |
+    // | 1     | 24 hours |    |           | self-signed applies at next sign-in |
+    // | 2     | 7 days   |    |           |             |
+    // | 3     | 30 days  |    |           |             |
+    // | 4     | never    |    |           |             |
+    in-out property <int> expiry-choice: 2;
+    in-out property <bool> copy-on-upload: true;
+    in-out property <bool> close-to-tray: true;
+    in-out property <bool> demo-on: false;
+    in-out property <bool> autostart: false;
+    in property <bool> can-autostart: false;
+    in property <string> settings-path: "";
+    callback set-autostart(bool);
+
+    // Slint generates change handlers for **callbacks**, not for plain properties — there is no
+    // `on_copy_on_upload_changed` to hang persistence on. So every control in the panel fires this
+    // one, and Rust reads the whole set back. One signal, one writer, no ordering questions.
+    callback settings-changed();
+    callback set-demo-mode(bool);
+
+    property <string> expiry-label:
+        root.expiry-choice == 0 ? "1 hour"
+      : root.expiry-choice == 1 ? "24 hours"
+      : root.expiry-choice == 2 ? "7 days"
+      : root.expiry-choice == 3 ? "30 days" : "never";
+
+    // ---- row context menu ---------------------------------------------------
+    // One popup for the whole list rather than one per row: the rows come and go with the folder,
+    // and a popup per row would be rebuilt on every refresh.
+    property <string> menu-id: "";
+    property <string> menu-name: "";
+    property <bool> menu-live: true;
+    property <length> menu-x: 0px;
+    property <length> menu-y: 0px;
 
     // ---- state ---------------------------------------------------------------
     in property <string> host: "";
@@ -94,6 +173,9 @@ export component App inherits Window {
     in property <bool> busy: false;
     in property <string> status: "";
     in property <string> toast: "";
+    /// Separate from the text so the card can fade out *with* its message still drawn; Rust clears
+    /// the text a beat after it clears this.
+    in property <bool> toast-visible: false;
     in property <string> session: "";
     in property <string> usage-text: "";
     in property <float> usage-fraction: 0.0;
@@ -122,7 +204,7 @@ export component App inherits Window {
                     background: root.accent;
                     Text {
                         text: "\u{2197}";
-                        font-size: 17px;
+                        font-size: 18px;
                         font-weight: 700;
                         color: root.on-accent;
                         horizontal-alignment: center;
@@ -132,7 +214,7 @@ export component App inherits Window {
 
                 VerticalLayout {
                     spacing: 1px;
-                    Text { text: "DriveDrop"; font-size: 17px; font-weight: 700; color: root.fg; }
+                    Text { text: "DriveDrop"; font-size: 18px; font-weight: 700; color: root.fg; }
                     Text {
                         text: root.signed-in ? root.folder : "not connected";
                         font-size: 12px;
@@ -146,9 +228,17 @@ export component App inherits Window {
                     alignment: center;
                     Text {
                         text: root.demo ? "DEMO" : root.session;
-                        font-size: 11px;
+                        font-size: 12px;
                         color: root.demo ? root.demo-fg : root.fg-3;
                     }
+                }
+
+                // Words, not the gear glyph: this font family has no coverage for U+2699, and an
+                // unlabelled button in a corner is not a discoverable settings affordance.
+                Button {
+                    text: "Settings";
+                    height: 28px;
+                    clicked => { settings.show(); }
                 }
             }
 
@@ -161,7 +251,7 @@ export component App inherits Window {
                 height: 26px;
                 VerticalLayout {
                 spacing: 4px;
-                Text { text: root.usage-text; font-size: 11px; color: root.fg-3; }
+                Text { text: root.usage-text; font-size: 12px; color: root.fg-3; }
                 Rectangle {
                     height: 4px;
                     border-radius: 2px;
@@ -188,7 +278,7 @@ export component App inherits Window {
                     Text {
                         text: "Drive has no API-key access — its file API is per-user, so a local UniFi OS account is used.";
                         wrap: word-wrap;
-                        font-size: 11px;
+                        font-size: 12px;
                         color: root.fg-3;
                     }
                     host-edit := LineEdit {
@@ -268,7 +358,7 @@ export component App inherits Window {
                 VerticalLayout {
                     spacing: 5px;
                     padding: 10px;
-                    Text { text: root.status; font-size: 11px; color: root.fg-2; }
+                    Text { text: root.status; font-size: 12px; color: root.fg-2; }
                     Rectangle {
                         height: 4px;
                         border-radius: 2px;
@@ -291,7 +381,12 @@ export component App inherits Window {
                 color: root.fg-3;
             }
 
-            // No height binding here. An earlier `height: (links + entries) * 52px` made the
+            // Even font sizes only. At 150 % scaling an 11 px size is 16.5 physical pixels, and a glyph
+    // rasterised across a half pixel reads as blurry no matter which rasteriser is asked — the
+    // Slint stack has no ClearType in it, so grid alignment is the lever that actually exists.
+    // Sizes here are 10/12/14/18, all of which land on whole pixels at 100/150/200 %.
+    //
+    // No height binding here. An earlier `height: (links + entries) * 52px` made the
             // scroll view's preferred size the size of its whole content, so the window grew to
             // ~1000px tall on a real drive and still showed rows clipped at the bottom: the
             // scroll view never had a viewport smaller than its content, so it could not scroll.
@@ -303,13 +398,16 @@ export component App inherits Window {
                 VerticalLayout {
                     spacing: 4px;
 
-                    // Empty is a state, not a blank rectangle: say which of the two empties this is.
+                    // Empty is a state, not a blank rectangle — but there are three empties, and
+                    // "Nothing in this folder." while not connected implies a folder was asked
+                    // about. Say which state this actually is.
                     if root.links.length == 0: Text {
                         height: 30px;
                         vertical-alignment: center;
-                        text: root.entries.length == 0 ? "Nothing in this folder."
-                                                       : "No share links in this folder yet.";
-                        font-size: 11px;
+                        text: !root.signed-in ? ""
+                              : root.entries.length == 0 ? "Nothing in this folder."
+                                                         : "No share links in this folder yet.";
+                        font-size: 12px;
                         color: root.fg-3;
                     }
 
@@ -317,11 +415,38 @@ export component App inherits Window {
                         height: 54px;
                         border-radius: 8px;
                         background: rowta.has-hover ? root.card-hi : root.card;
+                        // Named for assistive tech — and because a row you cannot address by name
+                        // cannot be right-clicked by a test either, which is how this app's context
+                        // menu went unverified for a day.
+                        accessible-role: AccessibleRole.list-item;
+                        accessible-label: ln.name;
+                        accessible-description: ln.subtitle;
                         rowta := TouchArea {
                             mouse-cursor: MouseCursor.pointer;
+                            // `clicked` fires for a finger or the **left** button only, so the
+                            // right button has to come from `pointer-event`. On the release rather
+                            // than the press, matching how a native menu appears.
                             clicked => {
                                 if ln.live { root.copy-link(ln.id); }
                                 else { root.re-share(ln.id); }
+                            }
+                            pointer-event(event) => {
+                                // `PointerEventButton` / `PointerEventKind`, not `MouseButton` —
+                                // the latter does not exist in 1.18, and the popup's x/y are
+                                // window-relative, so the row's own mouse position has to be
+                                // shifted by the difference of absolutes (the idiom Slint's own
+                                // listview uses).
+                                if (event.button == PointerEventButton.right
+                                    && event.kind == PointerEventKind.up) {
+                                    root.menu-id = ln.id;
+                                    root.menu-name = ln.name;
+                                    root.menu-live = ln.live;
+                                    root.menu-x = rowta.absolute-position.x + rowta.mouse-x
+                                                - root.absolute-position.x;
+                                    root.menu-y = rowta.absolute-position.y + rowta.mouse-y
+                                                - root.absolute-position.y;
+                                    ctx.show();
+                                }
                             }
                         }
                         HorizontalLayout {
@@ -339,7 +464,7 @@ export component App inherits Window {
                                 }
                                 Text {
                                     text: ln.subtitle;
-                                    font-size: 11px;
+                                    font-size: 12px;
                                     color: ln.live ? root.fg-3 : root.accent;
                                 }
                             }
@@ -361,7 +486,7 @@ export component App inherits Window {
                                         // U+00D7 rather than U+2715: the multiplication sign is in
                                         // every UI font, the heavy multiplication sign is not.
                                         text: "\u{00d7}";
-                                        font-size: 13px;
+                                        font-size: 14px;
                                         color: root.fg-3;
                                         horizontal-alignment: center;
                                     }
@@ -401,7 +526,7 @@ export component App inherits Window {
                                 alignment: center;
                                 Text {
                                     text: en.name;
-                                    font-size: 13px;
+                                    font-size: 14px;
                                     color: en.is-dir ? root.fg : root.fg-3;
                                     overflow: elide;
                                 }
@@ -421,15 +546,247 @@ export component App inherits Window {
                 }
             }
 
-            // ---- status / toast ---------------------------------------------
+            // ---- status ------------------------------------------------------
+            // The status line is for state that outlives a message. The toast used to share it,
+            // so "Link copied" overwrote "session ~29d" until the next refresh.
             Rectangle {
                 height: 24px;
                 Text {
-                    text: root.toast != "" ? root.toast : root.status;
-                    font-size: 11px;
-                    color: root.toast != "" ? root.accent : root.fg-3;
+                    text: root.status;
+                    font-size: 12px;
+                    color: root.fg-3;
                     vertical-alignment: center;
                     overflow: elide;
+                }
+            }
+        }
+
+        // ---- toast ----------------------------------------------------------
+        // A floating card that fades up from the bottom edge and dismisses itself, the way a
+        // Windows flyout does, instead of a line of text that sits there until something else
+        // overwrites it.
+        //
+        // This is translucency over a backdrop the window has *already* blurred — DWM blurs per
+        // window, so there is no such thing as acrylic on one element. Same trick Terminal's
+        // flyouts play, and the honest limit of it.
+        Rectangle {
+            width: Math.min(340px, root.width - 40px);
+            height: 44px;
+            x: (root.width - self.width) / 2;
+            // Lifts the last 10px as it fades in.
+            y: root.height - self.height - 18px + (root.toast-visible ? 0px : 10px);
+            opacity: root.toast-visible ? 1 : 0;
+            animate opacity { duration: 200ms; }
+            animate y { duration: 200ms; }
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: root.stroke;
+            background: root.dark ? #323232e8 : #fffffff2;
+
+            HorizontalLayout {
+                spacing: 10px;
+                padding-left: 14px;
+                padding-right: 14px;
+                alignment: center;
+
+                // A dot, not a tick: U+2713 is not reliably in the UI font, and a check that
+                // renders as tofu is not a confirmation.
+                Rectangle {
+                    width: 8px; height: 8px;
+                    border-radius: 4px;
+                    background: root.accent;
+                }
+                Text {
+                    text: root.toast;
+                    font-size: 12px;
+                    color: root.fg;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // ---- popups ---------------------------------------------------------
+        // Real top levels: they may extend past the window edge, close on click-outside, and need
+        // nothing special of the surface. A reference to a name declared further down is legal —
+        // the Settings button above calls settings.show().
+        ctx := PopupWindow {
+            close-policy: PopupClosePolicy.close-on-click-outside;
+            width: 224px;
+            height: 8px + (root.menu-live ? 3 : 4) * 30px;
+            // Clamp inside the window. Without this a right-click on a row near the bottom left
+            // the last item off-screen, and "Delete link" is the item you wanted.
+            x: Math.max(4px, Math.min(root.menu-x, root.width - 228px));
+            y: Math.max(4px, Math.min(root.menu-y, root.height - (8px + (root.menu-live ? 3 : 4) * 30px)));
+
+            Rectangle {
+                width: 100%; height: 100%;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: root.stroke;
+                // Nearly opaque: a menu over a blurred-through background is how you get a
+                // caption that reads differently on every pixel.
+                background: root.dark ? #2b2b2bf5 : #fffffffa;
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 0px;
+                    MenuRow {
+                        label: "Copy link";
+                        fg: root.menu-live ? root.fg : root.fg-3;
+                        hi: root.card-hi;
+                        dim: !root.menu-live;
+                        picked => { root.copy-link(root.menu-id); ctx.close(); }
+                    }
+                    MenuRow {
+                        label: "Open in browser";
+                        fg: root.menu-live ? root.fg : root.fg-3;
+                        hi: root.card-hi;
+                        dim: !root.menu-live;
+                        picked => { root.open-link(root.menu-id); ctx.close(); }
+                    }
+                    // Expiry is create-only (spec C23), so there is no "set expiration" here — an
+                    // expired row gets a new link, which is the only thing that can change it.
+                    //
+                    // `if`, not `visible:`: an invisible element still occupies its slot in a
+                    // layout, so with `visible` the card was sized for three rows and "Delete link"
+                    // painted itself outside the bottom border. Caught by looking at a screenshot
+                    // rather than by reading the code, which is why we take screenshots.
+                    if !root.menu-live: MenuRow {
+                        label: "New link";
+                        fg: root.accent;
+                        hi: root.card-hi;
+                        picked => { root.re-share(root.menu-id); ctx.close(); }
+                    }
+                    MenuRow {
+                        label: "Delete link";
+                        fg: root.dark ? #ff6b6b : #c42b1c;
+                        hi: root.card-hi;
+                        picked => { root.delete-link(root.menu-id); ctx.close(); }
+                    }
+                }
+            }
+        }
+
+        // ---- keyboard ---------------------------------------------------------
+        // Escape closes whatever is open; Ctrl+R and Ctrl+U are the two things worth a chord.
+        //
+        // `capture-key-pressed` rather than `key-pressed`: capture runs before the focused element,
+        // so Escape works while the caret is in the folder field or the password box. Everything
+        // that is not handled here is rejected, which puts it back on the normal path.
+        //
+        // Deliberately not Ctrl+W: the window hides to the tray, so Ctrl+W would read as "closed"
+        // while the app stays resident with no way back except the tray icon.
+        // `focus` is not a bindable property in 1.18; a Window picks its initial focus with
+        // `forward-focus` (set on the Window, below).
+        keys := FocusScope {
+            width: 0px;
+            height: 0px;
+
+            // Handler syntax is `(event) => { }` even for a callback with a return value, and the
+            // values are bare `accept` / `reject`, not `EventResult.accept`.
+            capture-key-pressed(event) => {
+                if event.text == Key.Escape {
+                    ctx.close();
+                    settings.close();
+                    return accept;
+                }
+                // Both cases: 1.18 has no String::to-lower-case, and matching only "r" would make
+                // the shortcut die for anyone with Caps Lock on.
+                if event.modifiers.control {
+                    if event.text == "r" || event.text == "R" { root.refresh(); return accept; }
+                    if (event.text == "u" || event.text == "U") && root.signed-in {
+                        root.choose-files();
+                        return accept;
+                    }
+                }
+                reject
+            }
+        }
+
+        settings := PopupWindow {
+            close-policy: PopupClosePolicy.close-on-click-outside;
+            width: 330px;
+            height: 312px;
+            x: Math.max(4px, root.width - 338px);
+            y: 44px;
+
+            Rectangle {
+                width: 100%; height: 100%;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: root.stroke;
+                background: root.dark ? #2b2b2bf5 : #fffffffa;
+
+                VerticalLayout {
+                    spacing: 7px;
+                    padding: 14px;
+
+                    Text { text: "Settings"; font-size: 14px; font-weight: 600; color: root.fg; }
+                    Text { text: "Default link expiry"; font-size: 12px; color: root.fg-3; }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        height: 30px;
+                        for choice[index] in ["1h", "24h", "7d", "30d", "never"]: Button {
+                            text: choice;
+                            primary: root.expiry-choice == index;
+                            clicked => {
+                                root.expiry-choice = index;
+                                root.settings-changed();
+                            }
+                        }
+                    }
+
+                    Text {
+                        // "expire after never" is what the naive format produces.
+                        text: root.expiry-choice == 4 ? "Links you create never expire."
+                                                      : "Links you create expire after \{root.expiry-label}.";
+                        font-size: 10px;
+                        color: root.fg-3;
+                    }
+
+                    // `toggled` is the CheckBox's own callback (no arguments); the `<=>` binding is
+                    // what moves the value, `toggled` is what says a *user* moved it.
+                    CheckBox {
+                        text: "Copy link after upload";
+                        checked <=> root.copy-on-upload;
+                        toggled => { root.settings-changed(); }
+                    }
+                    CheckBox {
+                        text: "Close button hides to tray";
+                        checked <=> root.close-to-tray;
+                        toggled => { root.settings-changed(); }
+                    }
+                    CheckBox {
+                        text: "Accept self-signed certificate";
+                        checked <=> root.insecure;
+                        toggled => { root.settings-changed(); }
+                    }
+                    CheckBox {
+                        text: "Start with Windows";
+                        // Hidden where nothing implements it. A disabled checkbox that promises a
+                        // login item no code creates is worse than no checkbox.
+                        visible: root.can-autostart;
+                        checked <=> root.autostart;
+                        toggled => { root.set-autostart(root.autostart); }
+                    }
+                    CheckBox {
+                        text: "Use demo data";
+                        checked <=> root.demo-on;
+                        toggled => { root.set-demo-mode(root.demo-on); }
+                    }
+
+                    Rectangle { vertical-stretch: 1; }
+
+                    Text {
+                        // %APPDATA%\... rather than the literal path: the panel is small, the
+                        // username adds nothing, and this text ends up in every screenshot.
+                        text: root.settings-path;
+                        font-size: 10px;
+                        color: root.fg-3;
+                        overflow: elide;
+                    }
                 }
             }
         }

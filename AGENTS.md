@@ -190,7 +190,31 @@ Write these down; every one was discovered the hard way.
   the tray icon's own `clicked` is a different callback and is **not exposed** on a
   SystemTrayIcon-rooted component, nor is `tooltip` — forward both through properties on the
   component. A tray and a window share no globals.
-- Slint components are **not `Send`**.
+- `visible: false` **still occupies its slot in a layout**. A context menu with one hidden row was
+  sized for three and painted the last item outside its own card. Use `if cond: Row {}`.
+- `REG_SZ` is **UTF-16LE with a NUL**. Writing `str::as_bytes()` stores UTF-8: the write returns
+  success, the checkbox stays ticked, and the loader gets garbage — autostart silently never
+  happens. Only reading the value back shows it (`tools/check-autostart.ps1`).
+- Slint's `PopupWindow` renders into the main window here, so `PrintWindow` on `MainWindowHandle`
+  captures it and `EnumWindows` shows no extra window. A missing popup in a capture is not proof it
+  did not open — the menu was written off as broken on exactly that evidence.
+- UI Automation cannot drive a Slint `CheckBox`: `InvokePattern.Invoke()` reports success and does
+  nothing, and `TogglePattern` is present but `Toggle()` is a no-op with an empty state. Send a real
+  press/release at the element's own `BoundingRectangle` (`tools/toggle.ps1`), and give rows
+  `accessible-label` so they can be addressed at all (`tools/row-click.ps1`).
+- `FocusScope.focus` is not bindable; a Window chooses initial focus with `forward-focus`. Callback
+  handlers are written `(event) => { … }` even when the callback returns a value, and the values are
+  bare `accept` / `reject`. Slint 1.18 has no `String::to-lower-case`, so a Ctrl+letter shortcut must
+  compare both cases or it dies under Caps Lock.
+- There is no change handler for a plain property (`on_copy_on_upload_changed` does not exist), so
+  persistence needs an explicit `settings-changed()` callback fired by every control in the panel.
+- **Even font sizes.** At 150 % scaling an 11 px size is 16.5 physical pixels, and a glyph
+  rasterised across a half pixel looks blurry whichever rasteriser you ask. The Slint stack has no
+  ClearType and no hinting knob to turn — grepping `i-slint-core` for smoothing/hinting finds
+  nothing — so grid alignment is the lever that exists: 10/12/14/18 land on whole pixels at
+  100/150/200 %.
+- `perl -pi -e 's/…/$foo/'` **interpolates `$foo` as a perl variable** and silently blanks the line.
+  It ate two lines of PowerShell here. Use the edit tool, or escape the dollars.
 - Slint components are **not `Send`**. Workers post through a channel and the UI thread drains
   it. Never touch the UI from a thread. Consequently shared state must be
   `Arc<Mutex<…>>`, not `Rc<RefCell<…>>`.
