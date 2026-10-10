@@ -12,7 +12,7 @@ copy the URL, open it, set an expiration, or delete it.
 
 ## Download
 
-**macOS 14+ (Apple Silicon or Intel)** → **[latest release](https://github.com/***REMOVED***/unifi-drive-drop/releases/latest)**
+**macOS 14+ (Apple Silicon or Intel)** → **[latest release](https://github.com/obiwantoby/unifi-drive-drop/releases/latest)**
 — `DriveDrop-<version>.dmg`, with `SHA256SUMS` alongside.
 
 The build is **ad-hoc signed and not notarized** (no Apple Developer ID), so Gatekeeper will
@@ -83,7 +83,7 @@ The Windows client is Rust, not a port of the Swift one — it shares nothing bu
 ```powershell
 winget install Rustlang.Rustup          # once
 
-git clone https://github.com/***REMOVED***/unifi-drive-drop
+git clone https://github.com/obiwantoby/unifi-drive-drop
 cd unifi-drive-drop\apps\windows-ui
 cargo build --release                   # target\release\drivedrop-ui.exe
 

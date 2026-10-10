@@ -12,7 +12,6 @@ apps/windows/target/
 *.app/
 
 # captured responses are intentional, but not the scratch ones
-spec/raw/*.zip
 /tmp/
 .DS_Store
 

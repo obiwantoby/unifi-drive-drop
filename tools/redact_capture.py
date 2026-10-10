@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scrub credentials from the research artifacts in this repo, in place.
 
-The captures under spec/raw/ were taken through a logging proxy and contain real session
+Captures taken through a logging proxy contain real session
 cookies, CSRF tokens, and in one case a plaintext login body. Their value is the
 request/response *shape*, not the credentials, so values are replaced with stable
 placeholders rather than deleting the evidence.
