@@ -8,7 +8,7 @@
 
 // No console window beside the GUI in release builds. Debug keeps it, because that is where the
 // mica and DPI diagnostics go.
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "main")]
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 slint::include_modules!();
 
