@@ -279,7 +279,10 @@ export component App inherits Window {
 
                     Text { text: "Connect to your console"; font-size: 14px; font-weight: 600; color: root.fg; }
                     Text {
-                        text: "Drive has no API-key access — its file API is per-user, so a local UniFi OS account is used.";
+                        // The per-user/API-key explanation belongs in the README, not on the
+                        // sign-in card: it reads as an apology, and nobody picking a console to
+                        // sign into needs to know why a user account is the only kind that works.
+                        text: "Sign in with your UniFi OS account.";
                         wrap: word-wrap;
                         font-size: 12px;
                         color: root.fg-3;
