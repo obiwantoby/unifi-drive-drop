@@ -77,6 +77,23 @@ jobs:
           if ($text -match "PerMonitorV2") { "manifest: PerMonitorV2 present" }
           else { throw "manifest: PerMonitorV2 MISSING - the exe will be bitmap-stretched on scaled displays" }
 
+          # Prove windows_subsystem actually took effect, rather than trusting the attribute.
+          # The bug this catches: `windows_subsystem = "main"` is invalid (only "windows" or
+          # "none"), but it sits behind cfg(all(target_os = "windows", not(debug_assertions))), so
+          # a macOS build never validates it and only the CI release build fails. Reading the
+          # Subsystem field off the PE header tests the outcome instead of the intent.
+          $peOff = [BitConverter]::ToInt32($bytes, 0x3C)
+          $sub   = [BitConverter]::ToUInt16($bytes, $peOff + 24 + 68)
+          if ($sub -ne 2) { throw "subsystem: expected GUI (2), got $sub - a console window opens beside the UI" }
+          "subsystem: GUI (2)"
+
+          # The terminal client is the opposite case: it must keep its console.
+          $tb   = [IO.File]::ReadAllBytes("apps/windows/target/release/drivedrop.exe")
+          $tpe  = [BitConverter]::ToInt32($tb, 0x3C)
+          $tsub = [BitConverter]::ToUInt16($tb, $tpe + 24 + 68)
+          if ($tsub -ne 3) { throw "drivedrop.exe: expected console (3), got $tsub" }
+          "drivedrop.exe: console (3)"
+
       - uses: actions/upload-artifact@v4
         with:
           name: drivedrop-windows
