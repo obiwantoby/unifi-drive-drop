@@ -1,0 +1,360 @@
+// DriveDrop — Fluent 2 UI.
+//
+// One component, no logic: every action is a callback into Rust, and every value shown is an
+// `in property`. That keeps the Windows front-end a view over the same `drivedrop` crate the
+// terminal client uses, so a fix to the API layer lands in both at once.
+//
+// Style is selected at runtime (see src/main.rs) rather than baked in, so this file renders the
+// same Fluent 2 controls on macOS during development as it will on Windows.
+
+import { Button, LineEdit, CheckBox, ScrollView } from "std-widgets.slint";
+
+export struct Link {
+    id: string,
+    name: string,
+    subtitle: string,
+    live: bool,
+}
+
+export struct Entry {
+    name: string,
+    path: string,
+    is-dir: bool,
+}
+
+export component App inherits Window {
+    title: "DriveDrop";
+    preferred-width: 460px;
+    preferred-height: 640px;
+    min-width: 420px;
+    min-height: 520px;
+    default-font-size: 14px;
+
+    // Palette. Fluent's dark surface ramp; the accent is left to the system where the style
+    // provides one, and only these neutral layers are painted by us.
+    property <color> surface:  #1b1b1b;
+    property <color> card:     #272727;
+    property <color> card-hi:  #2f2f2f;
+    property <color> stroke:   #383838;
+    property <color> fg:       #ffffff;
+    property <color> fg-2:     #c7c7c7;
+    property <color> fg-3:     #9a9a9a;
+    property <color> accent:   #4cc2ff;
+
+    // ---- actions -------------------------------------------------------------
+    callback sign-in(host: string, user: string, pass: string, insecure: bool);
+    callback sign-out();
+    callback refresh();
+    callback choose-files();
+    callback go-up();
+    callback open-entry(path: string);
+    callback copy-link(id: string);
+    callback re-share(id: string);
+    callback delete-link(id: string);
+
+    // ---- state ---------------------------------------------------------------
+    in property <string> host: "";
+    in property <string> user: "";
+    in-out property <bool> insecure: true;
+    in property <string> folder: "/Public";
+    in property <bool> signed-in: false;
+    in property <bool> demo: false;
+    in property <bool> busy: false;
+    in property <string> status: "";
+    in property <string> toast: "";
+    in property <string> session: "";
+    in property <string> usage-text: "";
+    in property <float> usage-fraction: 0.0;
+    in property <float> upload-progress: -1.0;
+    in property <[Link]> links: [];
+    in property <[Entry]> entries: [];
+
+    Rectangle {
+        background: root.surface;
+
+        VerticalLayout {
+            spacing: 14px;
+            padding: 18px;
+
+            // ---- header ------------------------------------------------------
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+
+                Rectangle {
+                    width: 30px; height: 30px;
+                    border-radius: 8px;
+                    background: root.accent;
+                    Text {
+                        text: "\u{2197}";
+                        font-size: 17px;
+                        font-weight: 700;
+                        color: #0a0a0a;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 1px;
+                    Text { text: "DriveDrop"; font-size: 17px; font-weight: 700; color: root.fg; }
+                    Text {
+                        text: root.signed-in ? root.folder : "not connected";
+                        font-size: 12px;
+                        color: root.fg-3;
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: root.demo ? "DEMO" : root.session;
+                        font-size: 11px;
+                        color: root.demo ? #f9a825 : root.fg-3;
+                    }
+                }
+            }
+
+            // ---- usage -------------------------------------------------------
+            if root.signed-in: VerticalLayout {
+                spacing: 4px;
+                Text { text: root.usage-text; font-size: 11px; color: root.fg-3; }
+                Rectangle {
+                    height: 4px;
+                    border-radius: 2px;
+                    background: root.stroke;
+                    Rectangle {
+                        width: parent.width * Math.max(0.0, Math.min(1.0, root.usage-fraction));
+                        height: 4px;
+                        border-radius: 2px;
+                        background: root.accent;
+                    }
+                }
+            }
+
+            // ---- sign-in -----------------------------------------------------
+            if !root.signed-in: Rectangle {
+                border-radius: 10px;
+                background: root.card;
+                VerticalLayout {
+                    spacing: 8px;
+                    padding: 12px;
+
+                    Text { text: "Connect to your console"; font-size: 14px; font-weight: 600; color: root.fg; }
+                    Text {
+                        text: "Drive has no API-key access — its file API is per-user, so a local UniFi OS account is used.";
+                        wrap: word-wrap;
+                        font-size: 11px;
+                        color: root.fg-3;
+                    }
+                    host-edit := LineEdit {
+                        text: root.host;
+                        placeholder-text: "Console address, e.g. https://console.local";
+                    }
+                    user-edit := LineEdit {
+                        text: root.user;
+                        placeholder-text: "Username";
+                    }
+                    pass-edit := LineEdit {
+                        placeholder-text: "Password";
+                        input-type: InputType.password;
+                    }
+                    CheckBox {
+                        text: "Accept self-signed certificate";
+                        checked: root.insecure;
+                        changed checked => { root.insecure = self.checked; }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { vertical-stretch: 1; }
+                        Button {
+                            text: root.busy ? "Connecting\u{2026}" : "Connect";
+                            enabled: !root.busy;
+                            primary: true;
+                            clicked => {
+                                root.sign-in(host-edit.text, user-edit.text,
+                                             pass-edit.text, root.insecure);
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Leave the address blank and press Connect to browse demo data.";
+                        font-size: 10px;
+                        color: root.fg-3;
+                    }
+                }
+            }
+
+            // ---- toolbar -----------------------------------------------------
+            if root.signed-in: HorizontalLayout {
+                spacing: 8px;
+                folder-edit := LineEdit {
+                    text: root.folder;
+                    placeholder-text: "/Public";
+                    horizontal-stretch: 1;
+                }
+                Button {
+                    text: "\u{2191}";
+                    height: 32px;
+                    clicked => { root.go-up(); }
+                }
+                Button {
+                    text: "\u{21bb}";
+                    height: 32px;
+                    enabled: !root.busy;
+                    clicked => { root.refresh(); }
+                }
+                Button {
+                    text: "Upload";
+                    height: 32px;
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => { root.choose-files(); }
+                }
+            }
+
+            // ---- upload progress --------------------------------------------
+            if root.upload-progress >= 0: Rectangle {
+                border-radius: 10px;
+                background: root.card;
+                VerticalLayout {
+                    spacing: 5px;
+                    padding: 10px;
+                    Text { text: root.status; font-size: 11px; color: root.fg-2; }
+                    Rectangle {
+                        height: 4px;
+                        border-radius: 2px;
+                        background: root.stroke;
+                        Rectangle {
+                            width: parent.width * Math.max(0.0, Math.min(1.0, root.upload-progress));
+                            height: 4px;
+                            border-radius: 2px;
+                            background: root.accent;
+                        }
+                    }
+                }
+            }
+
+            // ---- links -------------------------------------------------------
+            if root.signed-in: Text {
+                text: "SHARE LINKS";
+                font-size: 10px;
+                font-weight: 600;
+                color: root.fg-3;
+            }
+
+            ScrollView {
+                height: (root.links.length + root.entries.length) * 52px;
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    spacing: 4px;
+
+                    for ln in root.links: Rectangle {
+                        height: 54px;
+                        border-radius: 8px;
+                        background: rowta.has-hover ? root.card-hi : root.card;
+                        rowta := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                if ln.live { root.copy-link(ln.id); }
+                                else { root.re-share(ln.id); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            padding-left: 14px;
+                            padding-right: 12px;
+                            VerticalLayout {
+                                spacing: 2px;
+                                alignment: center;
+                                Text {
+                                    text: ln.name;
+                                    font-size: 14px;
+                                    color: ln.live ? root.fg : root.fg-2;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: ln.subtitle;
+                                    font-size: 11px;
+                                    color: ln.live ? root.fg-3 : root.accent;
+                                }
+                            }
+                            Rectangle { vertical-stretch: 1; }
+                            // Hover-revealed, so the resting state is one clean row of text.
+                            Rectangle {
+                                width: 26px; height: 26px;
+                                border-radius: 6px;
+                                visible: rowta.has-hover;
+                                background: delta.has-hover ? #3a3a3a : transparent;
+                                delta := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.delete-link(ln.id); }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "\u{2715}";
+                                        font-size: 11px;
+                                        color: root.fg-3;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                width: 26px; height: 26px;
+                                visible: rowta.has-hover;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: ln.live ? "\u{2398}" : "\u{21bb}";
+                                        font-size: 13px;
+                                        color: root.fg-3;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    for en in root.entries: Rectangle {
+                        height: 44px;
+                        border-radius: 6px;
+                        background: te.has-hover ? root.card-hi: transparent;
+                        te := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => { if en.is-dir { root.open-entry(en.path); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            padding-left: 10px;
+                            VerticalLayout {
+                                alignment: center;
+                                Text {
+                                    text: en.name;
+                                    font-size: 13px;
+                                    color: en.is-dir ? root.fg : root.fg-3;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- status / toast ---------------------------------------------
+            Rectangle {
+                height: 24px;
+                Text {
+                    text: root.toast != "" ? root.toast : root.status;
+                    font-size: 11px;
+                    color: root.toast != "" ? root.accent : root.fg-3;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+}

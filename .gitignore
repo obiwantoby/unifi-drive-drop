@@ -28,3 +28,6 @@ apps/macos/resources/AppIcon.iconset/
 
 # Release artifacts are published to GitHub Releases, not committed.
 apps/macos/dist/
+
+# Rust build output, at any depth (apps/windows, apps/windows-ui, ...)
+target/

@@ -76,6 +76,38 @@ unifi-drive-drop/
 The full loop — browse, upload, share, expire, delete — works on macOS against a real
 console. On Windows the same API port works from a terminal; there is no window yet.
 
+## Building on Windows
+
+The Windows client is Rust, not a port of the Swift one — it shares nothing but the API contract.
+
+```powershell
+winget install Rustlang.Rustup          # once
+
+git clone https://github.com/***REMOVED***/unifi-drive-drop
+cd unifi-drive-drop\apps\windows-ui
+cargo build --release                   # target\release\drivedrop-ui.exe
+
+# the terminal client, if you want it too
+cd ..\windows && cargo build --release  # target\release\drivedrop.exe
+```
+
+Then sign in with your UniFi OS address and the same local account the macOS app uses. For a
+self-signed certificate tick **Allow self-signed**.
+
+Two things worth knowing before you judge the text:
+
+- **Renderer.** `cargo build --release --features skia` swaps femtovg for Skia's font rasteriser.
+  Slint draws glyphs itself — ClearType and DirectWrite are not in the path — so this is the lever
+  for text clarity. Build both and keep whichever reads better on your display.
+- **Mica.** The backdrop is requested through `window-vibrancy`, and the exe declares
+  `PerMonitorV2` DPI awareness in its embedded manifest so Windows does not bitmap-stretch it on a
+  scaled display. Whether Mica actually shows behind a Slint surface is an open question: Slint
+  1.18 exposes no window-transparency API, and the app paints its own background, so the honest
+  expectation is *title-bar tint at best*.
+
+CI builds both binaries on `windows-latest` on every push and uploads them as artifacts, so you can
+download `drivedrop-ui.exe` from the Actions run instead of installing a toolchain.
+
 ## Auth: why it uses a password, not the API key
 
 The API key **is valid** — it authenticates past the console gateway and reads

@@ -1,0 +1,70 @@
+name: Windows
+
+# This workflow is the verification gate for apps/windows-ui. Slint compiles cross-platform, but
+# Mica, DPI awareness, the embedded manifest, and native dialogs can only be confirmed on
+# Windows — and the vibrancy call is deliberately compiled on macOS too, so a type error there is
+# caught here rather than by someone on a Windows machine.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/windows/**"
+      - "apps/windows-ui/**"
+      - ".github/workflows/windows.yml"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/windows -> target, apps/windows-ui -> target
+
+      # The library is where the protocol lives; its tests are all offline (MockClient), so they
+      # run here. The live console test stays #[ignore]d — CI has no console, and must not have
+      # one: a CI runner writing to someone's Drive is exactly the failure mode this project has
+      # already hit twice by accident.
+      - name: Test the API client
+        working-directory: apps/windows
+        run: cargo test --release
+
+      - name: Build the terminal client
+        working-directory: apps/windows
+        run: cargo build --release --bin drivedrop
+
+      - name: Build the Fluent UI
+        working-directory: apps/windows-ui
+        run: cargo build --release
+
+      # Fails the build on any warning, so the cross-platform vibrancy path cannot rot quietly.
+      - name: Check for warnings
+        working-directory: apps/windows-ui
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Report the binaries
+        run: |
+          Get-ChildItem apps/windows/target/release/drivedrop.exe, apps/windows-ui/target/release/drivedrop-ui.exe |
+            Select-Object Name, @{n="MB";e={[math]::Round($_.Length/1MB,1)}}
+          # DPI awareness must be in the embedded manifest, not just requested at runtime.
+          $bytes = [IO.File]::ReadAllBytes("apps/windows-ui/target/release/drivedrop-ui.exe")
+          $text  = [Text.Encoding]::ASCII.GetString($bytes)
+          if ($text -match "PerMonitorV2") { "manifest: PerMonitorV2 present" }
+          else { throw "manifest: PerMonitorV2 MISSING - the exe will be bitmap-stretched on scaled displays" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drivedrop-windows
+          path: |
+            apps/windows/target/release/drivedrop.exe
+            apps/windows-ui/target/release/drivedrop-ui.exe
+          if-no-files-found: error

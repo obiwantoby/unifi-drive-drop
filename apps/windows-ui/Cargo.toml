@@ -1,0 +1,56 @@
+[package]
+name = "drivedrop-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Fluent front-end for DriveDrop"
+
+[dependencies]
+# The verified API client, shared with the terminal tool. The UI holds no protocol logic of its
+# own on purpose: two implementations of the same contract drift, and drift here means a corrupt
+# upload rather than a wrong pixel.
+drivedrop = { path = "../windows" }
+
+# Style is NOT a crate feature — it is selected by slint-build in build.rs. Listing "fluent"
+# here fails to resolve, which is the trap.
+#
+# raw-window-handle-06 is not on by default, and without it Slint exposes no way to reach the
+# HWND, which is what window-vibrancy needs.
+slint = { version = "1", features = ["raw-window-handle-06"] }
+
+# Windows 11 Mica backdrop. Called on every platform rather than behind `cfg(windows)` so macOS
+# type-checks the exact expression that runs on Windows; off Windows it returns `Unsupported`.
+window-vibrancy = "0.8"
+
+# Native file picker.
+rfd = "0.15"
+
+# Clipboard.
+arboard = "3"
+
+# Expiry maths and the "expires 12 Jun, 14:05" formatting.
+chrono = "0.4"
+
+[features]
+# Text clarity, Windows. Slint rasterises glyphs itself — neither ClearType (a GDI subpixel
+# technique) nor DirectWrite is involved — so "make the text sharper" is a renderer choice, not a
+# system setting. femtovg is the default and lighter to build; Skia's font rasteriser generally
+# hints and positions glyphs better at small sizes and on fractional scale factors.
+#
+#     cargo build --release --features skia
+#
+# Build both on the real display and keep whichever reads better; the UI code is identical.
+skia = ["slint/renderer-winit-skia"]
+
+[build-dependencies]
+slint-build = "1"
+
+# Windows-only: embeds a manifest declaring PerMonitorV2 DPI awareness. rustc's default manifest
+# is system-aware only, so on a 150%-scaled display Windows bitmap-stretches the window when it
+# moves to a monitor with a different scale factor. That stretch, not font smoothing, is what
+# makes a Rust GUI look blurry on Windows.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = "thin"
+strip = true
