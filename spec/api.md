@@ -90,7 +90,7 @@ session (C18).
 POST /api/auth/login
 Content-Type: application/json
 
-{"username": "…", "password": "…", "rememberMe": true}
+{"username": "<REDACTED-USER>", "password": "…", "rememberMe": true}
 ```
 
 | Result | Status | Body |
@@ -229,7 +229,7 @@ Drive object:
 {
   "id": "0a527470-b749-4630-8f0b-3eb3e568dc02",
   "type": "shared | personal",
-  "name": "***REMOVED***",
+  "name": "example-user",
   "status": "active",
   "storagePoolId": "cf78bf79-af1c-4ee6-97c5-155c602aca90",
   "quota": -1,
@@ -552,7 +552,7 @@ Response:
   "expiresAt": "2026-10-16T11:28:20-04:00",
   "hasPassword": false, "accessLimit": 0, "accessedTimes": 0,
   "driveId": "0a527470-…", "driveLocked": false,
-  "createdBy": {"id": "…", "username": "***REMOVED***", "fullName": "Example User"},
+  "createdBy": {"id": "…", "username": "<REDACTED-USER>", "fullName": "Example User"},
   "sharedWith": [],
   "resource": {"name": "report.pdf", "size": 24580, "isDir": false, "type": "blob"}
 }}
@@ -750,11 +750,11 @@ answers it — each one creates its own fixture and deletes it, per the rule in 
 # 1. authenticate. Send no cookies.
 curl -k -c jar.txt -X POST https://<console>/api/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"u","password":"***","rememberMe":true}'
+  -d '{"username":"<REDACTED-USER>","password":"***","rememberMe":true}'
 
 # 2. the CSRF token is on the login response, not on proxied GETs
 curl -k -c hdr.txt -o /dev/null -X POST https://<console>/api/auth/login \
-  -H 'Content-Type: application/json' -d '{"username":"u","password":"***"}' \
+  -H 'Content-Type: application/json' -d '{"username":"<REDACTED-USER>","password":"***"}' \
   | grep -i x-csrf-token
 
 # 3. Drive version and bundle URL

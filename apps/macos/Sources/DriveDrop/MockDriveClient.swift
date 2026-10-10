@@ -8,7 +8,7 @@ import Foundation
 actor MockDriveClient: DriveClient {
     private var store: [ShareItem] = [
         // Deliberately NOT the real console host. Demo links that look like
-        // https://192.0.2.10/... get copied into Slack and then fail with no explanation.
+        // get copied into Slack and then fail with no explanation.
         // .invalid is reserved by RFC 2606 and can never resolve.
         ShareItem(id: "sh_1", fileId: "/mydrive/Public/site-plan.pdf", name: "site-plan.pdf", size: 2_411_724,
                   shareURL: URL(string: "https://demo.invalid/8f2c1a9e"),

@@ -2,7 +2,7 @@ import Foundation
 
 /// Real client against the console.
 ///
-/// Every endpoint here is VERIFIED against 192.0.2.10 (Drive 4.4.9 / UniFi OS 4.0.4);
+/// Every endpoint here is VERIFIED against a live UNAS Pro (Drive 4.4.9 / UniFi OS 4.0.4);
 /// see spec/api.md. Anything still unproven is marked and fails loudly rather than
 /// inventing a value.
 final class LiveDriveClient: DriveClient, @unchecked Sendable {

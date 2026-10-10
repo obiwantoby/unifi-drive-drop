@@ -3,7 +3,7 @@
 Narrative + method. **The endpoint reference lives in [`spec/api.md`](../spec/api.md).**
 Raw captured responses are in [`spec/raw/`](../spec/raw/).
 
-Target: `https://192.0.2.10` — UNAS Pro, UniFi OS 4.0.4, Drive controller 4.4.9.
+Target: `https://<REDACTED-IP>` — UNAS Pro, UniFi OS 4.0.4, Drive controller 4.4.9.
 
 ---
 

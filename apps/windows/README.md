@@ -20,7 +20,7 @@ end-to-end verified, but have not been run from Windows.
 
 ```bat
 cargo build --release
-set DRIVEDROP_HOST=192.168.1.10
+set DRIVEDROP_HOST=<REDACTED-IP>
 set DRIVEDROP_USER=admin
 set DRIVEDROP_PASS=secret
 set DRIVEDROP_INSECURE=1        &rem the console uses a self-signed certificate

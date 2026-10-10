@@ -4,7 +4,7 @@
 //! `DRIVEDROP_LIVE=1` is set:
 //!
 //! ```sh
-//! DRIVEDROP_HOST=192.0.2.10 DRIVEDROP_INSECURE=1 \
+//! DRIVEDROP_HOST=https://192.0.2.10 DRIVEDROP_INSECURE=1 \
 //! DRIVEDROP_USER=… DRIVEDROP_PASS=… DRIVEDROP_LIVE=1 \
 //! cargo test --test live -- --ignored --nocapture
 //! ```

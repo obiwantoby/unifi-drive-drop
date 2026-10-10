@@ -25,7 +25,10 @@ final class AppModel: ObservableObject {
     @Published var isBusy = false
 
     // settings
-    @AppStorage("host") var host: String = "192.0.2.10"
+    // No default on purpose. This shipped as somebody's real console address, which is both
+    // a privacy leak in a public repo and a bad default for everyone else: an address you
+    // did not choose is indistinguishable from one that was set for you.
+    @AppStorage("host") var host: String = ""
     @AppStorage("username") var username: String = ""
     /// The folder being shown **and** the drop target — one value on purpose, so what you
     /// look at is always what you upload into. Persisted under the original key.

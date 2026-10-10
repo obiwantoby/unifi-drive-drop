@@ -8,7 +8,7 @@ The whole window is the drop target — not a boxed "drop zone" you have to aim 
 
 ```
 ┌──────────────────────────────────────────────┐
-│  DriveDrop                    192.0.2.10  ⚙ │   header, 44pt
+│  DriveDrop                    <REDACTED-IP>  ⚙ │   header, 44pt
 ├──────────────────────────────────────────────┤
 │                                              │
 │         ⬆  Drop files to get a link          │   empty state /
@@ -97,7 +97,7 @@ list survives restarts and can re-validate against the console.
 
 | Key | Default |
 |---|---|
-| Console host | `192.0.2.10` |
+| Console host | `<REDACTED-IP>` |
 | Port | `443` |
 | Username | — |
 | Password | keychain / credential manager |

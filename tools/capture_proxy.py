@@ -3,7 +3,7 @@
 Logging reverse proxy for capturing the UniFi Drive web UI's real traffic.
 
 Why this works: the Drive SPA calls relative paths (/proxy/drive/api/v1/...). If you load
-the UI through http://localhost:8080 instead of https://192.0.2.10, those calls come here
+the UI through http://localhost:8080 instead of the console, those calls come here
 in cleartext and we forward them on to the console over TLS. No CA, no cert pinning,
 no browser configuration, no pcap decryption.
 
@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import os
 import re
 import sys
 import threading
@@ -36,7 +37,9 @@ from pathlib import Path
 
 OUT = Path(__file__).resolve().parent.parent / "spec" / "raw" / "capture.jsonl"
 
-TARGET_HOST = "192.0.2.10"
+# No default on purpose: this repo is public, and an example address that happens to be
+# somebody's real console is a leak. Set UNIFI_HOST before running.
+TARGET_HOST = os.environ.get("UNIFI_HOST") or ""
 TARGET_PORT = 443
 
 # Hop-by-hop headers must not be forwarded in either direction.

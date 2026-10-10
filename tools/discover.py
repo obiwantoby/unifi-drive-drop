@@ -7,7 +7,7 @@ then probes the Drive service under /proxy/drive/api/ and dumps every response.
 
 Stdlib only. Safe to re-run. Nothing is sent anywhere except the console you name.
 
-    export UNIFI_HOST=192.0.2.10
+    export UNIFI_HOST=https://your-console.local
     export UNIFI_USER=...            # optional; prompts if unset
     export UNIFI_PASS=...            # optional; prompts if unset
     python3 tools/discover.py            # read-only crawl
@@ -296,7 +296,7 @@ def b64(s: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default=os.environ.get("UNIFI_HOST", "192.0.2.10"))
+    ap.add_argument("--host", default=os.environ.get("UNIFI_HOST", ""))
     ap.add_argument("--user", default=os.environ.get("UNIFI_USER"))
     ap.add_argument("--pass", dest="pw", default=os.environ.get("UNIFI_PASS"))
     ap.add_argument("--mutate", action="store_true",

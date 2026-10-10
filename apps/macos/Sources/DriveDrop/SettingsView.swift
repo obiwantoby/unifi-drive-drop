@@ -17,7 +17,7 @@ struct SettingsView: View {
 
             Form {
                 Section("Console") {
-                    TextField("Host", text: $host, prompt: Text("192.0.2.10"))
+                    TextField("Host", text: $host, prompt: Text("https://console.local"))
                     TextField("Username", text: $user)
                     SecureField("Password", text: $pass,
                                 prompt: Text(model.username.isEmpty ? "Password" : "Stored — leave blank to keep"))

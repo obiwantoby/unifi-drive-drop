@@ -68,6 +68,36 @@ LOOSE_RULES: list[tuple[re.Pattern, Repl]] = [
     (re.compile(r'(?i)("?password_?revision"?\s*[:=]\s*"?)\d+'), r"\1<REDACTED>"),
 ]
 
+# --- identity shapes -----------------------------------------------------------------------
+# Secrets were the original target, and the literal table covers names and mailboxes. But a
+# console capture also carries hardware and network identity that nobody thinks to enumerate:
+# MAC addresses, device serials, the console's hostname, its LAN address, account names. Those
+# are shapes, so they are patterns here rather than entries in a gitignored file — a fresh clone
+# with no pii.json at all still gets them. This is the gap that let a public repo ship real MACs
+# and serial numbers while --check reported clean.
+IDENTITY_RULES: list[tuple[re.Pattern, Repl]] = [
+    # Colon/dash separated. Unambiguous shape, so it is matched anywhere.
+    (re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b"), "<REDACTED-MAC>"),
+    # The packed 12-hex form is NOT matched on shape alone: the tail of a UUID is exactly 12 hex
+    # characters, so a generic rule quietly destroys resource ids that the spec depends on. Keyed
+    # only. Q is used for every quote because captures nest JSON *inside* a JSON string, where the
+    # quotes arrive as \" — a rule written with plain quotes silently misses the entire capture
+    # file while --check still reports clean. The closing delimiter is deliberately not consumed,
+    # so it survives in whichever quoting style it came in.
+    (re.compile(r'(?i)(' + Q + r'(?:mac|mac_addr|mac_address|macAddress)' + Q + r'\s*:\s*' + Q
+                + r')[0-9A-Fa-f]{12}'), r"\1<REDACTED-MAC>"),
+    # RFC1918 only, so a public example in the spec survives. Optional port.
+    (re.compile(r"\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d{1,3}){1,2}(?::\d+)?\b"),
+     "<REDACTED-IP>"),
+    # Keyed values: precise enough that no guessy generic serial pattern is needed.
+    (re.compile(r'(?i)(' + Q + r'(?:serial|serials|device_serial|uplink_serial)' + Q
+                + r'\s*:\s*' + Q + r')[^"\\]*'), r"\1<REDACTED-SERIAL>"),
+    (re.compile(r'(?i)(' + Q + r'(?:hostname|device_name|host_name)' + Q + r'\s*:\s*' + Q
+                + r')[^"\\]*'), r"\1<REDACTED-HOSTNAME>"),
+    (re.compile(r'(?i)(' + Q + r'(?:username|user_name|login)' + Q + r'\s*:\s*' + Q
+                + r')[^"\\]*'), r"\1<REDACTED-USER>"),
+]
+
 # --- literal PII -------------------------------------------------------------------------
 # The captures are kept because their *shape* is the research. An operator's name, mailbox
 # and SSO handle are not part of any shape. A fixed table rather than a pattern: a generic
@@ -101,12 +131,17 @@ def iter_files(root: pathlib.Path):
             yield p
         elif p.is_dir():
             for f in sorted(p.rglob("*")):
+                # Build output is not source. Sweeping it rewrote a vendored generated header
+                # (36 "matches" in a webgl file) and mutated a tree the next build will not
+                # regenerate — a scrub run should never be able to corrupt a working directory.
+                if {".build", "target", "node_modules", "dist", "DerivedData"} & set(f.parts):
+                    continue
                 if f.is_file() and f.suffix in SCAN_SUFFIXES:
                     yield f
 
 
 def scrub(text: str, suffix: str) -> tuple[str, int]:
-    rules = JWT_RULES + (LOOSE_RULES if suffix in DATA_ONLY else [])
+    rules = JWT_RULES + ((LOOSE_RULES + IDENTITY_RULES) if suffix in DATA_ONLY else [])
     out = text
     hits = 0
     for pat, repl in rules:
@@ -152,6 +187,26 @@ FIXTURES: list[tuple[str, str, list[str]]] = [
     ('.md', '{"password":"<your console password>"}', ['"password":"<your console password>"']),
     ('.md', '{"password": "optional"}', ['"password": "optional"']),
     (".md", '"password": "optional"', ['"password": "optional"']),
+    # Identity shapes. Every one of these was present in a public repo while --check reported
+    # clean, because the table only ever held names and mailboxes.
+    (".json", '"mac": "***REMOVED***"', ['"mac": "<REDACTED-MAC>"']),
+    # The nested form, which is the one that actually appears in capture files. Written without Q
+    # these rules fired on the tidy fixtures and missed every real record.
+    (".jsonl", r'{"resp": "{\"mac\":\"AABBCCDDEEFF\"}"}', ['<REDACTED-MAC>']),
+    (".jsonl", r'{"resp": "{\"username\":\"someone\"}"}', ['<REDACTED-USER>']),
+    (".jsonl", r'{"resp": "{\"serial\":\"ABC12DEF\"}"}', ['<REDACTED-SERIAL>']),
+    (".json", '"mac": "***REMOVED***"', ['"mac": "<REDACTED-MAC>"']),
+    (".json", '"serial": "ABC12DEF"', ['"serial": "<REDACTED-SERIAL>"']),
+    (".json", '"hostname": "MyCleverDevice"', ['"hostname": "<REDACTED-HOSTNAME>"']),
+    (".json", '"username": "someoperator"', ['"username": "<REDACTED-USER>"']),
+    (".md", "Location: https://192.168.9.9/unifi-drive/", ["https://<REDACTED-IP>/unifi-drive/"]),
+    (".json", '"ip": "10.1.2.3:8443"', ['"ip": "<REDACTED-IP>"']),
+    # And must NOT fire. Documentation legitimately uses RFC5737 example addresses, and a UUID is
+    # not a MAC address — the reason the packed form is keyed rather than shape-based.
+    (".md", "curl https://203.0.113.10/api", ["203.0.113.10"]),
+    (".md", "curl https://198.51.100.7/api", ["198.51.100.7"]),
+    (".json", '"id": "0a527470-b749-4630-8f0b-3eb3e568dc02"',
+     ["0a527470-b749-4630-8f0b-3eb3e568dc02"]),
 ]
 
 

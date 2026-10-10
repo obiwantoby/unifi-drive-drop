@@ -154,7 +154,7 @@ Task { @MainActor in
         let m = AppModel(forTesting: MockDriveClient())
         m.reload()                                        // epoch 1, read blocks
         try? await Task.sleep(for: .milliseconds(100))
-        m.saveCredentials(host: "192.0.2.10", user: "***REMOVED***", pass: "NEWPW")   // epoch 2
+        m.saveCredentials(host: "192.0.2.1", user: "example-user", pass: "NEWPW")   // epoch 2
         try? await Task.sleep(for: .seconds(1.2))
         let pw = (m.client as? LiveDriveClient)?.session.password ?? "none"
         expect(pw == "NEWPW", "stale Keychain read does not undo a newer save",
