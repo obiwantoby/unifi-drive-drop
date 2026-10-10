@@ -180,6 +180,23 @@ struct MenuBarContent: View {
             }
         }
 
+        // Confirmation. The window has had a toast from the start; the popover never rendered
+        // one, so a copy from the menu bar produced no visible feedback whatsoever — the
+        // diagnostic trail shows the same row tapped five times in a single second, which is
+        // what someone does when nothing tells them it worked.
+        if let toast = model.toast {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                Text(toast).font(.caption).lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(.green.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+            .padding(.horizontal, 8)
+            .id(model.toastID)          // re-fire for a repeat of the same message
+            .transition(.opacity)
+        }
+
         if elsewhere > 0 {
             Text("\(elsewhere) other link\(elsewhere == 1 ? "" : "s") outside this folder")
                 .font(.caption2).foregroundStyle(.tertiary)

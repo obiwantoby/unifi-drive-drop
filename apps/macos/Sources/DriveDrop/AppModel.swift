@@ -15,6 +15,13 @@ final class AppModel: ObservableObject {
     @Published var isDropTargeted = false
     @Published var status: String = ""
     @Published var toast: String?
+    /// Bumped on every toast, including a repeat of the same message.
+    ///
+    /// Animating on `toast` alone means a second "Link copied" is invisible: the text is
+    /// already on screen, so nothing appears to happen — which reads as the copy having
+    /// failed, and sends people clicking the row again and again.
+    @Published private(set) var toastID = 0
+    private var toastTask: Task<Void, Never>?
     @Published var isBusy = false
 
     // settings
@@ -623,16 +630,33 @@ final class AppModel: ObservableObject {
         // setString returns false when the pasteboard refuses — secure input, or another
         // process holding it. Saying "Link copied" after that is a lie that only surfaces
         // when the paste comes up empty somewhere else.
-        guard pb.setString(s, forType: .string) else {
+        // Verify rather than assume. setString returns false under secure input or when
+        // another process holds the pasteboard, and reading the value back also catches a
+        // write that "succeeds" but is immediately overwritten.
+        let ok = pb.setString(s, forType: .string)
+        guard ok, pb.string(forType: .string) == s else {
             status = "Clipboard refused the write — copy it from the window"
             return false
         }
-        toast = label
-        Task {
-            try? await Task.sleep(for: .seconds(1.8))
-            if toast == label { toast = nil }
-        }
+        showToast(label)
         return true
+    }
+
+    /// Show a transient confirmation, restarting the timer even if the text is unchanged.
+    ///
+    /// The previous version slept in a fresh Task and cleared on `toast == label`, so a second
+    /// click within 1.8 s left the *first* task in charge of hiding a message the user had just
+    /// re-triggered — the toast vanished early, right after the click that should have made it
+    /// look most solid.
+    func showToast(_ s: String) {
+        toast = s
+        toastID &+= 1
+        toastTask?.cancel()
+        toastTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.8))
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.toast = nil }
+        }
     }
 
     /// Drop a failed row out of the list without retrying it.

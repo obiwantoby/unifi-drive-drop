@@ -39,7 +39,7 @@ struct ContentView: View {
             return true
         }
         .preferredColorScheme(.dark)
-        .animation(.spring(duration: 0.3, bounce: 0.25), value: model.toast)
+        .animation(.spring(duration: 0.3, bounce: 0.25), value: model.toastID)
         .animation(.spring(duration: 0.3, bounce: 0.25), value: model.isDropTargeted)
         .confirmationDialog("Delete this share?", isPresented: .init(
             get: { model.pendingDelete != nil },
