@@ -696,6 +696,11 @@ impl LiveClient {
 /// `demo.invalid` (RFC 2606) so a fake link can never be pasted and look real.
 pub struct MockClient {
     store: Mutex<Vec<ShareItem>>,
+    /// Files put there by `upload`, so the demo's Files list behaves like the console's: an upload
+    /// appears in the folder it was aimed at and in no other. A mock that answers every `browse`
+    /// with the same two fixtures cannot show whether the folder argument reached the server, which
+    /// is the whole point of the demo.
+    uploaded: Mutex<Vec<FileEntry>>,
 }
 
 impl MockClient {
@@ -717,6 +722,7 @@ impl MockClient {
                 mk("1", "site-plan.pdf", 2_411_724, 7_200, 3 * 86_400),
                 mk("2", "garage-clip.mov", 92_274_688, 86_400, 2_400),
             ]),
+            uploaded: Mutex::new(Vec::new()),
         }
     }
 }
@@ -734,16 +740,32 @@ impl DriveClient for MockClient {
     fn usage(&self) -> Result<Usage> {
         Ok(Usage { used_bytes: 3_724_542_208, total_bytes: 15_999_766_528 })
     }
-    fn browse(&self, _dir: &str) -> Result<Vec<FileEntry>> {
-        Ok(vec![
+    fn browse(&self, dir: &str) -> Result<Vec<FileEntry>> {
+        // Same folder rule the live client applies: fixtures live under /Public, and an upload is
+        // visible only in the directory it was written to.
+        let want = dir.trim().trim_matches('/');
+        let fixtures = [
             FileEntry { name: "Documents".into(), path: "/mydrive/Public/Documents".into(), is_dir: true, size: 0, modified: None },
             FileEntry { name: "site-plan.pdf".into(), path: "/mydrive/Public/site-plan.pdf".into(), is_dir: false, size: 2_411_724, modified: None },
-        ])
+        ];
+        let mut out: Vec<FileEntry> = fixtures
+            .into_iter()
+            .filter(|e| e.path.rsplit_once('/').map(|(p, _)| p.trim_matches('/')) == Some(want))
+            .collect();
+        out.extend(self.uploaded.lock().unwrap().iter().filter(|e| {
+            e.path.rsplit_once('/').map(|(p, _)| p.trim_matches('/')) == Some(want)
+        }).cloned());
+        Ok(out)
     }
     fn list_links(&self) -> Result<Vec<ShareItem>> {
         Ok(self.store.lock().unwrap().clone())
     }
     fn upload(&self, path: &Path, folder: &str, progress: &(dyn Fn(f32) + Send + Sync)) -> Result<ShareItem> {
+        // Mirror the live client, which reads the file first and fails on a bad path. A mock that
+        // "uploads" a file that does not exist turns every upload test into a test of nothing, and
+        // it is how this mock once hid a wrong path argument.
+        let data = std::fs::read(path)
+            .map_err(|e| DriveError::Unsupported(format!("cannot read {}: {e}", path.display())))?;
         for i in 1..=10 {
             std::thread::sleep(std::time::Duration::from_millis(40));
             progress(i as f32 / 10.0);
@@ -758,6 +780,13 @@ impl DriveClient for MockClient {
         } else {
             format!("/mydrive/{dir}/{name}")
         };
+        self.uploaded.lock().unwrap().push(FileEntry {
+            name: name.clone(),
+            path: file_id.clone(),
+            is_dir: false,
+            size: data.len() as i64,
+            modified: None,
+        });
         Ok(ShareItem {
             id: format!("demo-{}", uuid::Uuid::new_v4()),
             file_id,

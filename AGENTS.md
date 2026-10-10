@@ -235,6 +235,39 @@ Write these down; every one was discovered the hard way.
 - The unified log can filter or drop a subsystem. When debugging "did this code run?", an
   append-to-file channel does not lie. `log show` told me nothing while the code was running
   fine.
+- **Uploading is not sharing.** `LiveClient::upload` returns a `ShareItem` with `share_url: None`
+  because the console creates links in a second call. The UI said "Shared {name}" anyway, so a file
+  landed on the Drive with no link, no row, nothing to copy or delete - and the status line stayed
+  on "Uploading…" forever because nothing cleared it. `upload_all` now does upload -> `create_share`
+  -> refresh in one worker, and the toast only claims a share when a URL exists. One worker per
+  selected file would also mean N concurrent tus sessions against one console; batch the selection
+  and refresh once.
+- **A mock that succeeds on a broken path cannot catch a broken path.** `MockClient::upload` used to
+  sleep and return Ok without reading the file, so a test with a nonexistent path passed. It now
+  reads the file like the live client, and `browse` is scoped per folder - a mock that answers every
+  directory with the same two fixtures hides a wrong folder argument, which is how files end up in a
+  directory nobody chose.
+
+### Driving the UI from a script
+
+- **A synthetic click while another window owns the foreground is spent on activation** and never
+  reaches the control. `SetForegroundWindow` is refused from a non-foreground process; attach to the
+  foreground thread's input queue first (`tools/capture-click.ps1::Raise`). Before this, several "the
+  UI does not respond to clicks" investigations were fiction, and one checkbox I had filed as broken
+  turned out to be fine.
+- **UIA rectangles for content inside a Slint `PopupWindow` go stale** when the window grows to fit
+  the popup: it reported the "Use demo data" box 200px from where it is drawn. A window capture is
+  ground truth and maps 1:1 through `GetWindowRect`, so measure on the capture for anything inside a
+  popup, not on UIA.
+- The Win32 window title is **not** the Slint title, so `FindWindow("DriveDrop")` finds nothing.
+  Enumerate top levels and filter by process.
+- `$Pid` is a read-only automatic variable in PowerShell: a `-Pid` parameter silently compares
+  against the wrong process. Name it `-ProcessId`.
+- PowerShell 5.1 rejects some multi-line method calls and reads `.ps1` as ANSI. One statement per
+  line, no smart quotes or em dashes.
+- The native file picker holds several `Edit` controls (breadcrumb, search, filename) and UIA
+  returns the search box first, so `SetValue` writes into the wrong field and the dialog sits there
+  with an empty name. Raise the dialog and `SendKeys` the path, escaping `{ } ( ) + ^ % ~`.
 
 ## Feature parity checklist (Windows vs macOS)
 

@@ -91,7 +91,10 @@ export component App inherits Window {
     // surface keeps enough transparency for the acrylic to read, so the text tones have to be the
     // ends of their ramps, not mid-greys. `fg` on `surface` is >12:1 either way; `fg-3`, the
     // weakest tone used for captions, stays above 4.5:1.
-    property <color> surface:  root.backdrop ? (root.dark ? #1b1b1bb8 : #f3f3f3c4)
+    // Multiplies with the DWM tint (see `apply_backdrop`): 60% here over 40-50% there is ~76%
+    // opaque overall. Any more opaque than this and the blur is gone; any less and the captions
+    // over a busy wallpaper drop below readable.
+    property <color> surface:  root.backdrop ? (root.dark ? #1b1b1b99 : #f3f3f399)
                                              : (root.dark ? #1b1b1b    : #f3f3f3);
     property <color> card:     root.backdrop ? (root.dark ? #ffffff14 : #ffffffcc)
                                              : (root.dark ? #272727    : #ffffff);

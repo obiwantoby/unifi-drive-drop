@@ -445,9 +445,18 @@ fn apply_backdrop(ui: &App) -> bool {
     // raw-window-handle-06 feature — which is not enabled by default.
     let handle = ui.window().window_handle();
 
-    // Tinted dark so white text keeps contrast over a bright wallpaper. The alpha is the amount
-    // of blur that survives, not a dimmer: at 0xFF there is no point having asked for acrylic.
-    match window_vibrancy::apply_acrylic(handle, Some((0x1b, 0x1b, 0x1b, 0xb4))) {
+    // The tint alpha is the amount of blur that survives, not a dimmer - and it is the reason the
+    // effect was invisible here. DWM composites the tint *under* the surface Slint paints, so the
+    // two multiply: tint 0xB4 (71%) under a surface at 0xC4 (77%) leaves the window 93% opaque and
+    // the wallpaper contributes 7%, which is not an effect anyone can see. Both are now held to
+    // roughly 40-60%, for a combined ~76% - enough colour and movement to read as frosted glass,
+    // enough opacity that the text on the cards stays crisp.
+    //
+    // Light gets a light tint. A dark tint under a light surface is how you get grey mud over a
+    // bright wallpaper and washed-out text over a dark one.
+    let dark = ui.get_dark();
+    let tint = if dark { (0x1b, 0x1b, 0x1b, 0x80) } else { (0xf3, 0xf3, 0xf3, 0x66) };
+    match window_vibrancy::apply_acrylic(handle, Some(tint)) {
         Ok(()) => {
             println!("acrylic applied");
             return true;
@@ -847,10 +856,16 @@ fn wire(ui: &App, st: &Arc<State>) {
             .set_title(format!("Upload to {folder}"))
             .pick_files()
         else { return };
-        let copy = w.upgrade().map(|u| u.get_copy_on_upload()).unwrap_or(true);
-        for p in paths {
-            upload_one(&s, p, folder.clone(), copy);
-        }
+        let (copy, expiry) = w.upgrade()
+            .map(|u| (u.get_copy_on_upload(),
+                      drivedrop::models::Expiration::MENU
+                          [usize::try_from(u.get_expiry_choice().clamp(0, 4)).unwrap_or(2)]))
+            .unwrap_or((true, drivedrop::models::Expiration::SevenDays));
+        // One worker for the batch. One per file used to mean N concurrent tus sessions against
+        // one console, and N refreshes racing each other for the same list.
+        // Cloned per invocation — the handler is FnMut, so moving `s` in would break the second
+        // upload onward.
+        upload_all(Arc::clone(&s), paths, folder, expiry, copy);
     });
 
     let s = Arc::clone(st);
@@ -1020,40 +1035,86 @@ fn load(s: &Arc<State>, c: Client, folder: String) {
     let _ = s.tx.send(Msg::Busy(false));
 }
 
-fn upload_one(s: &Arc<State>, path: PathBuf, folder: String, copy_after: bool) {
+/// Upload → share → refresh, in one worker, for the whole batch.
+///
+/// Each step was missing, and each was a bug the user hit:
+///
+/// | was | consequence |
+/// |-----|-------------|
+/// | `upload()` returns `share_url: None` and nothing created a link | the file was on the Drive with no link, and the toast said "Shared" |
+/// | no refresh after upload | the new file only appeared after pressing Refresh |
+/// | status never cleared | the bottom line sat on "Uploading …" forever |
+/// | one worker per file | N concurrent tus sessions hammering one console |
+///
+/// The share is created with the expiry chosen in Settings, and `create_share` already resolves a
+/// "link already exists" 403 into the existing link, so re-uploading a name is not an error.
+fn upload_all(s: Arc<State>, paths: Vec<PathBuf>, folder: String, expiry: drivedrop::models::Expiration,
+              copy_after: bool) {
     let Some(c) = s.client.lock().unwrap().clone() else { return };
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let tx = s.tx.clone();
-    let _ = tx.send(Msg::UploadProgress(0.0));
-    let _ = tx.send(Msg::Status(format!("Uploading {name} to {folder}…")));
-
     std::thread::spawn(move || {
-        // The progress callback is invoked from this worker, so it only ever touches the
-        // channel — never the UI.
-        let cb = |p: f32| { let _ = tx.send(Msg::UploadProgress(p)); };
-        match c.upload(&path, &folder, &cb) {
-            Ok(item) => {
-                let _ = tx.send(Msg::Uploaded);
-                // The preference is "copy the link", not "mention the link": the point is to paste
-                // it somewhere, so doing it silently is the feature. When there is no URL, say so
-                // instead of reporting a share that cannot be opened.
-                let toast = match (copy_after, item.share_url.as_deref()) {
-                    (true, Some(u)) => match copy_to_clipboard(u) {
-                        Ok(()) => format!("Shared {} — link copied", item.name),
-                        Err(e) => format!("Shared {}, but the copy failed: {e}", item.name),
-                    },
-                    (true, None) => format!("Uploaded {}, no share URL to copy", item.name),
-                    _ => format!("Shared {}", item.name),
-                };
-                let _ = tx.send(Msg::Toast(toast));
-            }
-            Err(e) => {
-                let _ = tx.send(Msg::Uploaded);
-                let _ = tx.send(Msg::Failed(format!("{name}: {e}")));
+        let n = paths.len();
+        let mut shared: Vec<(String, String)> = Vec::new();   // (name, url)
+        let mut problems: Vec<String> = Vec::new();
+
+        for (i, path) in paths.iter().enumerate() {
+            let name = path.file_name().map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "upload.bin".into());
+            let label = if n > 1 { format!("{name} ({}/{n})", i + 1) } else { name.clone() };
+            let _ = tx.send(Msg::UploadProgress(0.0));
+            let _ = tx.send(Msg::Status(format!("Uploading {label}…")));
+
+            let cb = |p: f32| { let _ = tx.send(Msg::UploadProgress(p)); };
+            let item = match c.upload(path, &folder, &cb) {
+                Ok(it) => it,
+                Err(e) => { problems.push(format!("{name}: {e}")); continue; }
+            };
+
+            // The upload puts bytes on the Drive; this is the step that makes it a link.
+            let _ = tx.send(Msg::Status(format!("Sharing {label}…")));
+            match c.create_share(&item.file_id, expiry, None) {
+                Ok(link) => {
+                    s.by_id.lock().unwrap().insert(link.id.clone(), link.clone());
+                    match link.share_url.as_deref() {
+                        Some(u) => shared.push((name, u.to_string())),
+                        // A link object with no URL is not shareable; saying "Shared" here is the
+                        // lie that started this.
+                        None => problems.push(format!("{name}: the console returned a link with no URL")),
+                    }
+                }
+                Err(e) => problems.push(format!("{name}: uploaded, but the link failed: {e}")),
             }
         }
+
+        // One line, truthful, and then cleared: the progress bar and "Uploading" must not outlive
+        // the upload.
+        let _ = tx.send(Msg::Uploaded);
+        let _ = tx.send(Msg::Status(String::new()));
+
+        let toast = match (shared.len(), problems.len()) {
+            (0, 0) => "Upload finished with no files".to_string(),
+            (0, _) => format!("Upload failed — {}", problems.join("; ")),
+            (s, 0) if s == n => {
+                if copy_after {
+                    match shared.last().map(|(_, u)| copy_to_clipboard(u)) {
+                        Some(Ok(())) => format!("{s} shared — link copied"),
+                        Some(Err(e)) => format!("{s} shared — the copy failed: {e}"),
+                        None => format!("{s} shared"),
+                    }
+                } else {
+                    format!("{s} shared")
+                }
+            }
+            (s, p) => format!("{s} shared, {p} not: {}", problems.join("; ")),
+        };
+        let _ = tx.send(Msg::Toast(toast));
+
+        // The listing is what tells the user it worked. Refreshing it here is the difference
+        // between "it went fast" and "it worked".
+        load(&s, c, folder);
     });
 }
+
 
 fn report_session(s: &Arc<State>, c: &LiveClient) {
     // LiveClient exposes the bearer token's expiry so "will this die mid-upload?" is answerable
@@ -1148,6 +1209,85 @@ fn human(n: i64) -> String {
     while v >= 1000.0 && u < UNITS.len() - 1 { v /= 1024.0; u += 1; }
     let s = if v < 10.0 { format!("{v:.1}") } else { format!("{v:.0}") };
     format!("{}{} {}", if neg { "-" } else { "" }, s, UNITS[u])
+}
+
+/// The upload flow, end to end against the same MockClient the demo uses.
+///
+/// This is the bug the operator hit on a real console: the file uploaded fast, nothing appeared
+/// until Refresh, the bottom line stayed on "Uploading…", and the file had no link to copy or
+/// delete. The cause was sequencing in the UI, not the transport, so it is tested here rather than
+/// only against a live Drive — and `MockClient::upload` returns `share_url: None` exactly like the
+/// live client does, so a fix that forgot the share step would fail this.
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    #[test]
+    fn upload_shares_refreshes_and_clears_the_status() {
+        let (tx, rx) = channel::<Msg>();
+        let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), tx });
+        let mock: Client = Arc::new(MockClient::new());
+        *st.client.lock().unwrap() = Some(Arc::clone(&mock));
+
+        let f = std::env::temp_dir().join("drivedrop-upload-test.txt");
+        std::fs::write(&f, b"hello drivedrop").expect("temp file");
+
+        upload_all(Arc::clone(&st), vec![f.clone()], "/Public".into(),
+                   drivedrop::models::Expiration::SevenDays, false);
+
+        let mut links: Vec<Link> = Vec::new();
+        let mut status = String::from("unset");
+        let mut toast = String::new();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Msg::Links(v)) => links = v,
+                Ok(Msg::Status(s)) => status = s,
+                Ok(Msg::Toast(t)) => toast = t,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+            if !links.is_empty() && status.is_empty() && !toast.is_empty() { break; }
+        }
+        let _ = std::fs::remove_file(&f);
+
+        assert!(!links.is_empty(),
+                "the uploaded file must appear in the link list with no manual refresh");
+        assert!(links.iter().any(|l| l.name.starts_with("drivedrop-upload-test")),
+                "the new file's row must be among the links shown, got {:?}",
+                links.iter().map(|l| l.name.to_string()).collect::<Vec<_>>());
+        assert!(toast.contains("shared"), "the toast must report a real share, got {toast:?}");
+        assert_eq!(status, "", "the status line must not stay on \"Uploading…\"");
+    }
+
+    #[test]
+    fn a_failed_upload_says_so_instead_of_claiming_a_share() {
+        let (tx, rx) = channel::<Msg>();
+        let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), tx });
+        *st.client.lock().unwrap() = Some(Arc::new(MockClient::new()));
+
+        // A path that cannot exist: the upload step must fail, not report success.
+        let missing = PathBuf::from("Z:\\definitely-not-here\\ghost.bin");
+        upload_all(Arc::clone(&st), vec![missing], "/Public".into(),
+                   drivedrop::models::Expiration::SevenDays, false);
+
+        let mut toast = String::new();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Msg::Toast(t)) => toast = t,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+            if !toast.is_empty() { break; }
+        }
+
+        assert!(!toast.is_empty(), "a finished batch must always say something");
+        assert!(!toast.contains("shared"),
+                "nothing was shared, so the toast must not say it was: {toast:?}");
+    }
 }
 
 #[cfg(test)]
