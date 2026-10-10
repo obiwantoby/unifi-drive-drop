@@ -11,7 +11,12 @@ apps/macos/build/
 apps/windows/target/
 *.app/
 
-# captured responses are intentional, but not the scratch ones
+# Captured console responses: these are what leaked (device MACs, users, serials). The spec is the
+# product, not the captures — see tools/check-pii.sh, which fails CI if any of this is tracked.
+spec/raw/
+*.jsonl
+
+# scratch
 /tmp/
 .DS_Store
 
