@@ -32,7 +32,7 @@ struct DriveDropApp: App {
         MenuBarExtra("DriveDrop", systemImage: "arrow.up.forward.square") {
             MenuBarContent()
                 .environmentObject(model)
-                .frame(width: 300)
+                .frame(width: 320)
         }
         .menuBarExtraStyle(.window)
     }

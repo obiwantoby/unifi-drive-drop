@@ -87,86 +87,94 @@ struct MenuBarContent: View {
                 }
                 Spacer()
             }
-            .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
+            .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 8)
 
             if let u = model.usage {
                 ProgressView(value: Double(u.usedBytes), total: Double(max(1, u.totalBytes)))
-                    .controlSize(.mini).padding(.horizontal, 10)
+                    .controlSize(.mini).padding(.horizontal, 12).padding(.bottom, 2)
             }
 
             Divider()
 
             // Links in this folder -----------------------------------------------
-            if shown.isEmpty {
-                Text(model.usingMock
-                     ? "Demo data — sign in to see your links."
-                     : "No share links in this folder yet.")
-                    .font(.caption).foregroundStyle(.tertiary)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-            } else {
-                ForEach(ordered) { item in
-                  Group {
-                    let st = rowState(item)
+            // One glass card holding the rows, rather than bare rows on the popover's own
+            // material: it groups them, and it is the same surface language the window uses.
+            VStack(spacing: 3) {
+                if shown.isEmpty {
+                    Text(model.usingMock
+                         ? "Demo data — sign in to see your links."
+                         : "No share links in this folder yet.")
+                        .font(.caption).foregroundStyle(.tertiary)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                } else {
+                    ForEach(ordered) { item in
+                      Group {
+                        let st = rowState(item)
 
-                    Button { model.tap(item) } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: st.live ? "link" : "link.badge.questionmark")
-                                .foregroundStyle(st.live ? Color.primary : Color.secondary)
-                            VStack(alignment: .leading, spacing: 0) {
-                                Text(item.name).lineLimit(1).font(.callout)
-                                if let c = Fmt.countdown(to: item.expiresAt) {
-                                    Text(c).font(.caption2)
-                                        .foregroundStyle(st.live ? Color.secondary : Color.orange)
-                                } else if !st.live {
-                                    Text(st.why).font(.caption2).foregroundStyle(.secondary)
+                        Button { model.tap(item) } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: st.live ? "link" : "link.badge.questionmark")
+                                    .foregroundStyle(st.live ? Color.primary : Color.secondary)
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text(item.name).lineLimit(1).font(.callout)
+                                    if let c = Fmt.countdown(to: item.expiresAt) {
+                                        Text(c).font(.caption2)
+                                            .foregroundStyle(st.live ? Color.secondary : Color.orange)
+                                    } else if !st.live {
+                                        Text(st.why).font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(st.live ? 1 : 0.62)
+                        // Not `.disabled` — that would hide the refusal from VoiceOver and leave the
+                        // click doing nothing at all, which is the bug this replaces.
+                        .accessibilityLabel("\(item.name), \(st.why). \(st.live ? "Copies the link" : "Offers actions")")
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+
+                        // Nothing to copy → ask what the user wants, right here.
+                        if let rest = st.offer, model.openRowID == item.id {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(RowTapPolicy.actions(for: rest), id: \.self) { action in
+                                    Button {
+                                        switch action {
+                                        case .reShare:    Task { await model.reShare(item) }
+                                        case .retry:
+                                            if let u = item.localPath { Task { await model.upload(u) } }
+                                            model.openRowID = nil
+                                        case .dismiss:
+                                            if case .failed = item.phase { model.dismiss(item) }
+                                            model.openRowID = nil
+                                        case .openWindow:
+                                            NSApp.activate(ignoringOtherApps: true)
+                                            openWindow(id: "main")
+                                        }
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: actionIcon(action))
+                                            Text(action.title)
+                                            Spacer()
+                                        }
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.caption)
+                                    .padding(.horizontal, 26).padding(.vertical, 2)
                                 }
                             }
-                            Spacer()
+                            .padding(.bottom, 3)
                         }
-                        .contentShape(Rectangle())
+                      }
                     }
-                    .buttonStyle(.plain)
-                    .opacity(st.live ? 1 : 0.62)
-                    // Not `.disabled` — that would hide the refusal from VoiceOver and leave the
-                    // click doing nothing at all, which is the bug this replaces.
-                    .accessibilityLabel("\(item.name), \(st.why). \(st.live ? "Copies the link" : "Offers actions")")
-                    .padding(.horizontal, 10).padding(.vertical, 3)
-
-                    // Nothing to copy → ask what the user wants, right here.
-                    if let rest = st.offer, model.openRowID == item.id {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(RowTapPolicy.actions(for: rest), id: \.self) { action in
-                                Button {
-                                    switch action {
-                                    case .reShare:    Task { await model.reShare(item) }
-                                    case .retry:
-                                        if let u = item.localPath { Task { await model.upload(u) } }
-                                        model.openRowID = nil
-                                    case .dismiss:
-                                        if case .failed = item.phase { model.dismiss(item) }
-                                        model.openRowID = nil
-                                    case .openWindow:
-                                        NSApp.activate(ignoringOtherApps: true)
-                                        openWindow(id: "main")
-                                    }
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: actionIcon(action))
-                                        Text(action.title)
-                                        Spacer()
-                                    }
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .font(.caption)
-                                .padding(.horizontal, 26).padding(.vertical, 2)
-                            }
-                        }
-                        .padding(.bottom, 3)
-                    }
-                  }
                 }
+
             }
+            .padding(6)
+            .glassSurface(cornerRadius: 14)
+            .padding(.horizontal, 10)
 
             if elsewhere > 0 {
                 Text("\(elsewhere) other link\(elsewhere == 1 ? "" : "s") outside this folder")
@@ -184,17 +192,14 @@ struct MenuBarContent: View {
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "main")
             } label: {
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     Image(systemName: "macwindow")
                     Text("Open Window")
-                    Spacer()
-                    Text("upload · refresh · settings")
-                        .font(.caption2).foregroundStyle(.tertiary)
                 }
-                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 10).padding(.vertical, 4)
+            .glassButton()
+            .padding(.horizontal, 10).padding(.vertical, 2)
 
             Divider()
 
@@ -224,8 +229,7 @@ struct MenuBarContent: View {
                     Text(toast).font(.callout.weight(.medium))
                 }
                 .padding(.horizontal, 14).padding(.vertical, 8)
-                .background(.regularMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
+                .glassCapsule()
                 .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
                 .padding(.bottom, 18)
                 .id(model.toastID)

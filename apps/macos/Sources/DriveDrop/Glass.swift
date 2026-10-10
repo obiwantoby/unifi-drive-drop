@@ -56,3 +56,49 @@ struct VisualEffectView: NSViewRepresentable {
         v.blendingMode = blending
     }
 }
+
+// MARK: - Glass modifiers
+
+extension View {
+    /// A glass surface behind the content: real liquid glass on macOS 26, ultra-thin material
+    /// below. Written once so the popover and the window cannot drift apart.
+    @ViewBuilder
+    func glassSurface(cornerRadius: CGFloat = 14, interactive: Bool = false) -> some View {
+        if #available(macOS 26.0, *) {
+            let g: Glass = interactive ? .regular.interactive() : .regular
+            self.glassEffect(g, in: .rect(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            self.background(.ultraThinMaterial,
+                            in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(.white.opacity(0.10), lineWidth: 1)
+                )
+        }
+    }
+
+    /// The capsule form, for floating confirmations.
+    @ViewBuilder
+    func glassCapsule() -> some View {
+        if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: .capsule)
+        } else {
+            self.background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
+        }
+    }
+
+    /// `.glass` / `.glassProminent` where the OS has them, bordered equivalents below.
+    /// The two styles are distinct types, so the choice is branches rather than a ternary.
+    @ViewBuilder
+    func glassButton(prominent: Bool = false) -> some View {
+        if #available(macOS 26.0, *) {
+            if prominent { self.buttonStyle(.glassProminent) }
+            else { self.buttonStyle(.glass) }
+        } else if prominent {
+            self.buttonStyle(.borderedProminent)
+        } else {
+            self.buttonStyle(.bordered)
+        }
+    }
+}
