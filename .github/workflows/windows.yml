@@ -52,9 +52,13 @@ jobs:
         run: |
           set -o pipefail
           cargo build --release 2>&1 | tee build.log || {
-            grep -E "^(error|warning: unused|error\[)" -A 6 build.log | head -60 | while IFS= read -r line; do
-              echo "::error::${line}"
-            done
+            # CARGO_TERM_COLOR=always prefixes every line with ANSI escapes, so an anchored
+            # `^error` matches nothing and this block silently produces zero annotations — which
+            # is exactly how the first failure became undiagnosable. Strip the escapes first.
+            sed -e 's/\x1b\[[0-9;]*m//g' build.log \
+              | grep -E "^(error|warning:)" -A 6 | head -50 | while IFS= read -r line; do
+                echo "::error::${line}"
+              done
             exit 1
           }
 
