@@ -16,9 +16,14 @@
 //!
 //! `DragAcceptFiles` + `WM_DROPFILES` is about a third of this code and needs no COM. It was
 //! rejected because it reports a drop only after it happens: no `DragEnter`, no `DragOver`, so the
-//! window cannot say "drop to upload to /Public" while the user is dragging, and cannot say "sign
-//! in first" before they commit. That feedback is the difference between a drop target you
-//! discover and one you trust.
+//! window cannot say "drop to upload to /Public" while you are still dragging, with the folder
+//! named before you let go. That feedback is the difference between a drop target you discover and
+//! one you trust.
+//!
+//! What the overlay does *not* do is refuse. An earlier version said "Sign in first" while signed
+//! out, which is a message you cannot act on with a file in one hand and no free click — the drop
+//! still had to land somewhere. So every file drag is accepted and `main` keeps the ones that got
+//! there before a sign-in, shows the count on the sign-in card, and uploads them when it happens.
 
 #![cfg(windows)]
 

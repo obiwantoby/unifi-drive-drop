@@ -134,6 +134,10 @@ struct State {
     client: Mutex<Option<Client>>,
     /// id → the item behind it. Re-share needs the drive path, and the UI only carries ids.
     by_id: Mutex<HashMap<String, ShareItem>>,
+    /// Files dropped while nobody was signed in. Releasing a file is a promise to upload it, and
+    /// bouncing it back at someone who has just let go of the mouse is not an answer they can act
+    /// on — so the drop lands, the files wait, and signing in collects them.
+    pending: Mutex<Vec<PathBuf>>,
     tx: Sender<Msg>,
 }
 
@@ -168,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (tx, rx) = channel::<Msg>();
-    let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), tx });
+    let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), pending: Mutex::new(Vec::new()), tx });
 
     wire(&ui, &st);
 
@@ -209,7 +213,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             while let Ok(m) = drain.try_recv() {
                 match m {
                     Msg::Dropped(paths) => start_upload(&ui, &st_drops, paths),
-                    other => apply(&ui, other, &clock),
+                    other => {
+                        // Asked before `apply` moves it. Sign-in is the moment a queued drop can
+                        // finally go out, and the moment has to be caught here rather than inside
+                        // `apply`, which is only allowed to paint.
+                        let signed_in_now = matches!(other, Msg::SignedIn { .. });
+                        apply(&ui, other, &clock);
+                        if signed_in_now {
+                            flush_pending(&ui, &st_drops);
+                        }
+                    }
                 }
             }
             // Two deadlines rather than one: hide starts the 200 ms fade, and the text is only
@@ -513,9 +526,14 @@ fn start_upload(ui: &App, st: &Arc<State>, paths: Vec<PathBuf>) {
         return;
     }
     if !ui.get_signed_in() {
-        // Say why nothing happened. A drop that is silently ignored reads as a broken drop target,
-        // and the user will drag the same file three times.
-        let _ = st.tx.send(Msg::Toast("Sign in first — drops upload to your console".into()));
+        // Not a refusal. The files are kept, the count is put on screen where the sign-in form is,
+        // and signing in uploads them without a second drag.
+        let n = paths.len();
+        if let Ok(mut q) = st.pending.lock() {
+            *q = paths;
+        }
+        ui.set_waiting(n as i32);
+        let _ = st.tx.send(Msg::Toast(waiting_toast(n)));
         return;
     }
     let folder = drive::canonical(&ui.get_folder());
@@ -528,6 +546,28 @@ fn start_upload(ui: &App, st: &Arc<State>, paths: Vec<PathBuf>) {
 // Keeps the retry timer alive: a Timer that is dropped cancels its pending callback.
 thread_local! {
     static BACKUP_TIMERS: std::cell::RefCell<Vec<slint::Timer>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// "3 files waiting — sign in to upload them", in the app's own voice rather than an error's.
+fn waiting_toast(n: usize) -> String {
+    format!(
+        "{n} {} waiting — sign in to upload {}",
+        if n == 1 { "file" } else { "files" },
+        if n == 1 { "it" } else { "them" }
+    )
+}
+
+/// Sign-in worked; anything left behind by a drop that got there first goes out now.
+fn flush_pending(ui: &App, st: &Arc<State>) {
+    let queued = match st.pending.lock() {
+        Ok(mut q) => std::mem::take(&mut *q),
+        Err(_) => return,
+    };
+    if queued.is_empty() {
+        return;
+    }
+    ui.set_waiting(0);
+    start_upload(ui, st, queued);
 }
 
 /// Acrylic, then Mica, then nothing — and the answer is reported to the UI, which paints its
@@ -1165,8 +1205,12 @@ fn wire(ui: &App, st: &Arc<State>) {
     ui.on_sign_out(move || {
         *s.client.lock().unwrap() = None;
         s.by_id.lock().unwrap().clear();
+        // A drop left waiting for a sign-in that has now been cancelled. Uploading it later would
+        // send someone else's files to a console they never chose.
+        s.pending.lock().unwrap().clear();
         if let Some(ui) = w.upgrade() {
             ui.set_signed_in(false);
+            ui.set_waiting(0);
             // Everything the previous session put on screen goes with it. A screenshot of this
             // bug showed "not connected" next to the DEMO badge, a full usage bar and two live
             // rows — which reads as "still connected, label is wrong", the worst possible
@@ -1475,6 +1519,14 @@ fn human(n: i64) -> String {
 /// delete. The cause was sequencing in the UI, not the transport, so it is tested here rather than
 /// only against a live Drive — and `MockClient::upload` returns `share_url: None` exactly like the
 /// live client does, so a fix that forgot the share step would fail this.
+/// The wording a dropped file gets when nobody is signed in. Tested on its own because the code
+/// path that shows it needs a window, a real drag and a mouse, none of which a test has.
+#[test]
+fn a_drop_before_sign_in_says_how_many_files_are_waiting() {
+    assert_eq!(waiting_toast(1), "1 file waiting — sign in to upload it");
+    assert_eq!(waiting_toast(4), "4 files waiting — sign in to upload them");
+}
+
 #[cfg(test)]
 mod upload_tests {
     use super::*;
@@ -1482,7 +1534,7 @@ mod upload_tests {
     #[test]
     fn upload_shares_refreshes_and_clears_the_status() {
         let (tx, rx) = channel::<Msg>();
-        let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), tx });
+        let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), pending: Mutex::new(Vec::new()), tx });
         let mock: Client = Arc::new(MockClient::new());
         *st.client.lock().unwrap() = Some(Arc::clone(&mock));
 
@@ -1521,7 +1573,7 @@ mod upload_tests {
     #[test]
     fn a_failed_upload_says_so_instead_of_claiming_a_share() {
         let (tx, rx) = channel::<Msg>();
-        let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), tx });
+        let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), pending: Mutex::new(Vec::new()), tx });
         *st.client.lock().unwrap() = Some(Arc::new(MockClient::new()));
 
         // A path that cannot exist: the upload step must fail, not report success.
