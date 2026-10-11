@@ -310,6 +310,25 @@ instead of guessing turned up four gaps, all now closed except drag-and-drop:
   foreground thread's input queue first (`tools/capture-click.ps1::Raise`). Before this, several "the
   UI does not respond to clicks" investigations were fiction, and one checkbox I had filed as broken
   turned out to be fine.
+- **Slint cannot receive a file dragged out of Explorer.** `DropArea` only accepts drags started by
+  a `DragArea` in the same app, and the winit backend discards winit's `DroppedFile`/`HoveredFile`
+  events — still true upstream. The only way in is an OLE `IDropTarget` on the HWND (`src/dnd.rs`).
+- **winit already owns that drop target.** It registers one so it can emit `DroppedFile`, so
+  `RegisterDragDrop` fails with `0x80040101` ("already registered") until you `RevokeDragDrop`.
+  That error is the discovery, not a bug in your code.
+- **`#[implement]` needs three things that do not look related:** the `implement` feature on the
+  `windows` crate (without it the `_Impl` traits are configured out and the interface looks
+  missing), `windows-core` as a *direct* dependency (the macro expands to `windows_core::` paths,
+  and `windows::core` is the same code under a different name), and the trait impl targets the
+  generated `Foo_Impl` type — `impl IDropTarget_Impl for DropTarget_Impl`, not for your struct.
+- **Module paths in the `windows` crate are not where you expect:** `FORMATETC`, `DVASPECT_CONTENT`
+  and `TYMED_HGLOBAL` live in `System::Com`, not `System::Ole`; `STGMEDIUM` hides behind
+  `Win32_Graphics_Gdi` *and* `Win32_System_Com_StructuredStorage`. Read the `cfg` lines in the
+  registry source rather than guessing feature names.
+- **Always answer `DROPEFFECT_COPY`.** Answering `MOVE` tells the source it may delete the original
+  once the drop lands — an uploader that empties someone's Downloads folder is a data-loss bug.
+- **The HWND is two calls out of Slint:** `ui.window().window_handle().window_handle()` — the first
+  returns Slint's handle, which implements `HasWindowHandle`, and only the second is the raw one.
 - **UIA rectangles for content inside a Slint `PopupWindow` go stale** when the window grows to fit
   the popup: it reported the "Use demo data" box 200px from where it is drawn. A window capture is
   ground truth and maps 1:1 through `GetWindowRect`, so measure on the capture for anything inside a

@@ -27,6 +27,8 @@ type Client = Arc<dyn DriveClient + Send + Sync>;
 
 /// Drive paths, mirroring `DrivePath` in the macOS app so both clients mean the same thing by
 /// `/Public`.
+mod dnd;
+
 mod drive {
     /// Collapse a user-typed path. Strips the qualified prefix if one was pasted in, resolves
     /// `.`/`..`, and always returns something starting with `/` — a bare `Public` would otherwise
@@ -119,6 +121,11 @@ enum Msg {
     UploadProgress(f32),
     Uploaded,
     SignedIn { demo: bool },
+    /// A drag from Explorer is over/leaving the window. Drives the "drop to upload" overlay; the
+    /// drop target itself cannot reach the UI, only this channel.
+    DropHover(bool),
+    /// Files released onto the window. Same path the picker uses.
+    Dropped(Vec<PathBuf>),
 }
 
 /// Shared with worker threads, so everything in here is `Arc<Mutex<…>>` rather than
@@ -165,10 +172,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     wire(&ui, &st);
 
+    // Drag-and-drop from Explorer, registered from a one-shot timer rather than inline: the HWND
+    // does not exist until the event loop has created the window, and a window that silently never
+    // accepts drops is indistinguishable from one with this code removed.
+    {
+        let dnd_ui = ui.as_weak();
+        let dnd_tx = st.tx.clone();
+        let dnd_timer = slint::Timer::default();
+        dnd_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(200),
+            move || {
+                let Some(ui) = dnd_ui.upgrade() else { return };
+                // Cloned per call: the timer closure is FnMut, so moving the Sender in would break
+                // any later firing.
+                enable_drop_target(&ui, dnd_tx.clone());
+            },
+        );
+        BACKUP_TIMERS.with(|v| v.borrow_mut().push(dnd_timer));
+    }
+
     // Drain console results on the UI thread. 40 ms is below the threshold where a progress bar
     // looks steppy and far below anything that costs noticeable power when idle.
     let sink = ui.as_weak();
     let drain = rx;
+    // `Dropped` needs the shared state to start an upload, and `apply` deliberately only knows how
+    // to paint, so that one variant is handled here and everything else goes to `apply`.
+    let st_drops = Arc::clone(&st);
     let clock = std::rc::Rc::new(std::cell::RefCell::<ToastClock>::default());
     let timer = slint::Timer::default();
     timer.start(
@@ -177,7 +207,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         move || {
             let Some(ui) = sink.upgrade() else { return };
             while let Ok(m) = drain.try_recv() {
-                apply(&ui, m, &clock);
+                match m {
+                    Msg::Dropped(paths) => start_upload(&ui, &st_drops, paths),
+                    other => apply(&ui, other, &clock),
+                }
             }
             // Two deadlines rather than one: hide starts the 200 ms fade, and the text is only
             // cleared once that fade is over — clearing it immediately drains the card mid-fade
@@ -418,6 +451,78 @@ fn install_backdrop(ui: &App) {
         // The timer must outlive this function or the pending callback dies with it.
         BACKUP_TIMERS.with(|v| v.borrow_mut().push(t));
     }
+}
+
+/// Register the OLE drop target so a drag out of Explorer lands here. See `dnd`.
+///
+/// The returned COM interface is parked in a thread-local: OLE keeps a raw pointer to the
+/// implementation, so letting it drop would leave the window calling into freed memory on the next
+/// drag over it.
+fn enable_drop_target(ui: &App, tx: Sender<Msg>) {
+    #[cfg(windows)]
+    {
+        // Two `window_handle()` calls, not a mistake: Slint's returns its own handle type, and
+        // `HasWindowHandle` on that is what yields the raw one. The HWND is a `NonNull<c_void>`
+        // reaching us as an integer, and `HWND` wants the pointer back.
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let raw = match ui.window().window_handle().window_handle() {
+            Ok(h) => h.as_raw(),
+            Err(e) => {
+                eprintln!("drop target: no window handle yet ({e:?})");
+                return;
+            }
+        };
+        let hwnd = match raw {
+            RawWindowHandle::Win32(w) => {
+                windows::Win32::Foundation::HWND(w.hwnd.get() as *mut core::ffi::c_void)
+            }
+            _ => {
+                eprintln!("drop target: not a Win32 window, ignoring");
+                return;
+            }
+        };
+        match dnd::register(hwnd, tx) {
+            Ok(target) => {
+                DROP_TARGETS.with(|v| v.borrow_mut().push((hwnd, target)));
+                println!("drag-and-drop enabled");
+            }
+            Err(e) => eprintln!("drag-and-drop unavailable ({e:?})"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // No OLE here. The overlay property stays false and the picker stays the only route.
+        let _ = (ui, tx);
+    }
+}
+
+#[cfg(windows)]
+thread_local! {
+    static DROP_TARGETS:
+        std::cell::RefCell<Vec<(windows::Win32::Foundation::HWND,
+                                windows::Win32::System::Ole::IDropTarget)>> = Default::default();
+}
+
+/// The one route from "here are files" to "they are on the Drive and shared".
+///
+/// The picker and an Explorer drag both end up here, so folder, expiry, copy-after-upload and the
+/// refresh after the last file cannot drift apart between the two entry points.
+fn start_upload(ui: &App, st: &Arc<State>, paths: Vec<PathBuf>) {
+    ui.set_drop_hover(false);
+    if paths.is_empty() {
+        return;
+    }
+    if !ui.get_signed_in() {
+        // Say why nothing happened. A drop that is silently ignored reads as a broken drop target,
+        // and the user will drag the same file three times.
+        let _ = st.tx.send(Msg::Toast("Sign in first — drops upload to your console".into()));
+        return;
+    }
+    let folder = drive::canonical(&ui.get_folder());
+    let copy = ui.get_copy_on_upload();
+    let expiry = drivedrop::models::Expiration::MENU
+        [usize::try_from(ui.get_expiry_choice().clamp(0, 4)).unwrap_or(2)];
+    upload_all(Arc::clone(st), paths, folder, expiry, copy);
 }
 
 // Keeps the retry timer alive: a Timer that is dropped cancels its pending callback.
@@ -850,22 +955,17 @@ fn wire(ui: &App, st: &Arc<State>) {
     let w = ui.as_weak();
     ui.on_choose_files(move || {
         let Some(ui) = w.upgrade() else { return };
-        // Native dialog, on the UI thread — rfd drives the platform picker itself.
+        // Native dialog, on the UI thread — rfd drives the platform picker itself. Multi-select:
+        // the whole batch then goes through one worker, because one worker per file used to mean N
+        // concurrent tus sessions against one console and N refreshes racing for the same list.
         let folder = drive::canonical(&ui.get_folder());
         let Some(paths) = rfd::FileDialog::new()
             .set_title(format!("Upload to {folder}"))
             .pick_files()
         else { return };
-        let (copy, expiry) = w.upgrade()
-            .map(|u| (u.get_copy_on_upload(),
-                      drivedrop::models::Expiration::MENU
-                          [usize::try_from(u.get_expiry_choice().clamp(0, 4)).unwrap_or(2)]))
-            .unwrap_or((true, drivedrop::models::Expiration::SevenDays));
-        // One worker for the batch. One per file used to mean N concurrent tus sessions against
-        // one console, and N refreshes racing each other for the same list.
-        // Cloned per invocation — the handler is FnMut, so moving `s` in would break the second
-        // upload onward.
-        upload_all(Arc::clone(&s), paths, folder, expiry, copy);
+        // The same entry point an Explorer drag uses, so the two cannot disagree about folder,
+        // expiry, copy-after-upload or when the listing gets refreshed.
+        start_upload(&ui, &s, paths);
     });
 
     let s = Arc::clone(st);
@@ -1333,6 +1433,13 @@ fn apply(ui: &App, m: Msg, clock: &std::cell::RefCell<ToastClock>) {
         Msg::Entries(v) => ui.set_entries(ModelRc::from(std::rc::Rc::new(VecModel::from(v)))),
         Msg::UploadProgress(p) => ui.set_upload_progress(p),
         Msg::Uploaded => ui.set_upload_progress(-1.0),
+        // The overlay is driven from here rather than from the COM callback, because the callback
+        // cannot reach the UI and must not try.
+        Msg::DropHover(on) => ui.set_drop_hover(on),
+        // Intercepted by the drain loop, which has the shared state this needs; `apply` is only
+        // allowed to paint. Unreachable, and exhaustive matching is what keeps it honest if a
+        // variant is ever added.
+        Msg::Dropped(_) => {}
         Msg::SignedIn { demo } => {
             ui.set_signed_in(true);
             ui.set_demo(demo);

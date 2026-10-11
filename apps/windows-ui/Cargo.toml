@@ -35,7 +35,29 @@ chrono = "0.4"
 
 # Windows only: the registry read behind the light/dark palette. Same pin as the API crate.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Registry"] }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    # Drag-and-drop: IDropTarget on the HWND, CF_HDROP payloads, and the shell's file enumeration.
+    # `implement` is what generates the COM vtable behind `#[implement(IDropTarget)]`; without it
+    # the `_Impl` traits are configured out and the error reads like the interface is missing.
+    # `STGMEDIUM` hides behind two more features than its module name suggests.
+    "implement",
+    "Win32_System_Ole",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_SystemServices",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+] }
+
+# Already in the tree via Slint; named here to read the HWND out of Slint's window handle.
+raw-window-handle = "0.6"
+
+# `#[implement]` expands to paths under `windows_core::`, so the macro needs that crate reachable
+# under that exact name - `windows::core` is the same code, not the same path. Same version `windows`
+# 0.58 already pulls in, so this adds no compilation.
+windows-core = "0.58"
 
 [features]
 # Text clarity, Windows. Slint rasterises glyphs itself — neither ClearType (a GDI subpixel

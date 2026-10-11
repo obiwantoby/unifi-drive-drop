@@ -254,6 +254,10 @@ export component App inherits Window {
     in property <[Link]> links: [];
     in property <int> elsewhere: 0;
     in property <[Entry]> entries: [];
+    /// True while a file drag from Explorer is over the window. Set from the OLE drop target via
+    /// the channel; false everywhere else, including off Windows, so the overlay never appears
+    /// where drops cannot happen.
+    in property <bool> drop-hover: false;
 
     Rectangle {
         background: root.surface;
@@ -1095,6 +1099,63 @@ export component App inherits Window {
                         font-size: 10px;
                         color: root.fg-3;
                         overflow: elide;
+                    }
+                }
+            }
+        }
+
+        // ---- drag-and-drop ---------------------------------------------------
+        // The reason `IDropTarget` was worth the COM: without a DragEnter signal the window looks
+        // exactly the same while you are dragging at it, and a drop target you have to discover is
+        // one you do not trust. It says where the files will go, and refuses before you commit
+        // rather than after.
+        if root.drop-hover: Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+
+            // Scrim plus a card, not text floating over whatever happens to be underneath: the
+            // first version put "Sign in first" straight across the sign-in form and it read as a
+            // rendering glitch rather than an answer.
+            Rectangle {
+                width: 100%; height: 100%;
+                background: root.signed-in
+                    ? (root.dark ? #00121a80 : #eaf1f8a6)
+                    : (root.dark ? #0000008c : #ffffffb8);
+            }
+
+            Rectangle {
+                width: 340px;
+                height: 92px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 12px;
+                border-width: 2px;
+                border-color: root.signed-in ? root.accent : root.fg-3;
+                background: root.dark ? #2b2b2bf5 : #fffffffa;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    padding: 12px;
+
+                    Text {
+                        horizontal-alignment: center;
+                        text: root.signed-in ? "Drop to upload to \{root.folder}"
+                                             : "Sign in first";
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: root.signed-in ? root.accent : root.fg-2;
+                    }
+                    Text {
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                        text: root.signed-in
+                            ? "Copied, not moved — your originals stay where they are."
+                            : "Drops upload to the console you are signed into.";
+                        font-size: 12px;
+                        color: root.fg-3;
                     }
                 }
             }
