@@ -760,6 +760,11 @@ impl DriveClient for MockClient {
         let fixtures = [
             FileEntry { name: "Documents".into(), path: "/mydrive/Public/Documents".into(), is_dir: true, size: 0, modified: None },
             FileEntry { name: "site-plan.pdf".into(), path: "/mydrive/Public/site-plan.pdf".into(), is_dir: false, size: 2_411_724, modified: None },
+            // Every link in the demo has a file behind it, as it would on a real console. With this
+            // row missing, the sample listing filed `garage-clip.mov` under "links with no file in
+            // this folder" - a section that should be rare - so the demo showed a shape no real
+            // console produces and made the odd case look normal.
+            FileEntry { name: "garage-clip.mov".into(), path: "/mydrive/Public/garage-clip.mov".into(), is_dir: false, size: 92_274_688, modified: None },
         ];
         let trashed = self.trashed.lock().unwrap();
         let kept = |e: &FileEntry| in_dir(&e.path) && !trashed.iter().any(|t| t == &e.path);

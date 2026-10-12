@@ -23,6 +23,9 @@ export struct Link {
     tone: int,
     /// Index into the expiry menu, -1 when unknown, so "Set expiration" can tick the current one.
     exp: int,
+    /// The file this link points at, in the same form `browse` reports paths in. Needed to tell a
+    /// link that duplicates a file row from a link whose file has gone missing.
+    path: string,
 }
 
 export struct Entry {
@@ -36,6 +39,15 @@ export struct Entry {
     /// URL. Carried here rather than looked up by id because Slint has no model-search helper and
     /// scanning the link list from a function is worse than carrying one string.
     direct: string,
+    /// The share state of this file, copied off the link that points at it: "expires Oct 16",
+    /// "never expires", "expired - click to make a new link", or empty when nothing is shared.
+    sub: string,
+    /// Expiry tone of that link: 0 secondary, 1 within a day, 2 expired. Unshared rows use 0.
+    tone: int,
+    /// Index into the expiry menu for "Set expiration", -1 when unknown.
+    exp: int,
+    /// True when a link exists and still works. Decides whether the row says copy, new or link.
+    live: bool,
 }
 
 /// One row of the context menu. Hover and enable are per row; the popup is its own top level, so
@@ -461,14 +473,6 @@ export component App inherits Window {
                 }
             }
 
-            // ---- links -------------------------------------------------------
-            if root.signed-in: Text {
-                vertical-stretch: 0;
-                text: "SHARE LINKS IN THIS FOLDER";
-                font-size: 10px;
-                font-weight: 600;
-                color: root.fg-3;
-            }
 
             // Even font sizes only. At 150 % scaling an 11 px size is 16.5 physical pixels, and a glyph
     // rasterised across a half pixel reads as blurry no matter which rasteriser is asked — the
@@ -492,161 +496,35 @@ export component App inherits Window {
                     // `vertical-stretch: 0`.
                     alignment: start;
 
-                    // Empty is a state, not a blank rectangle — but there are three empties, and
-                    // "Nothing in this folder." while not connected implies a folder was asked
-                    // about. Say which state this actually is.
-                    if root.links.length == 0: Text {
+
+                    // Empty is a state, not a blank rectangle — and "Nothing in this folder." while
+                    // not connected implies a folder was asked about. Say which state this is.
+                    if root.entries.length == 0 && root.links.length == 0: Text {
                         vertical-stretch: 0;
                         height: 30px;
                         vertical-alignment: center;
-                        text: !root.signed-in ? ""
-                              : root.entries.length == 0 ? "Nothing in this folder."
-                                                         : "No share links in this folder yet.";
+                        text: !root.signed-in ? "" : "Nothing in this folder.";
                         font-size: 12px;
                         color: root.fg-3;
                     }
 
-                    for ln in root.links: Rectangle {
-                        height: 54px;
-                        // A Rectangle in a layout stretches on the layout's axis by default, so
-                        // "54px" was only a wish: with a short list the rows absorbed the empty
-                        // viewport and grew to 78px, with a long one they fought each other. Pin
-                        // them and let the leftover sit at the bottom of the list where it belongs.
-                        vertical-stretch: 0;
-                        border-radius: 8px;
-                        background: rowta.has-hover ? root.card-hi : root.card;
-                        // Named for assistive tech — and because a row you cannot address by name
-                        // cannot be right-clicked by a test either, which is how this app's context
-                        // menu went unverified for a day.
-                        accessible-role: AccessibleRole.list-item;
-                        accessible-label: ln.name;
-                        accessible-description: ln.subtitle;
-                        rowta := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
-                            // `clicked` fires for a finger or the **left** button only, so the
-                            // right button has to come from `pointer-event`. On the release rather
-                            // than the press, matching how a native menu appears.
-                            clicked => {
-                                if ln.live { root.copy-link(ln.id); }
-                                else { root.re-share(ln.id); }
-                            }
-                            pointer-event(event) => {
-                                // `PointerEventButton` / `PointerEventKind`, not `MouseButton` —
-                                // the latter does not exist in 1.18, and the popup's x/y are
-                                // window-relative, so the row's own mouse position has to be
-                                // shifted by the difference of absolutes (the idiom Slint's own
-                                // listview uses).
-                                if (event.button == PointerEventButton.right
-                                    && event.kind == PointerEventKind.up) {
-                                    root.menu-id = ln.id;
-                                    root.menu-name = ln.name;
-                                    root.menu-live = ln.live;
-                                    root.menu-entry = false;
-                                    root.menu-direct = ln.direct;
-                                    root.menu-exp = ln.exp;
-                                    root.menu-dir = false;
-                                    root.menu-path = "";
-                                    root.menu-x = rowta.absolute-position.x + rowta.mouse-x
-                                                - root.absolute-position.x;
-                                    root.menu-y = rowta.absolute-position.y + rowta.mouse-y
-                                                - root.absolute-position.y;
-                                    ctx.show();
-                                }
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 12px;
-                            padding-left: 14px;
-                            padding-right: 12px;
-                            VerticalLayout {
-                                spacing: 2px;
-                                alignment: center;
-                                Text {
-                                    text: ln.name;
-                                    font-size: 14px;
-                                    color: ln.live ? root.fg : root.fg-2;
-                                    overflow: elide;
-                                }
-                                Text {
-                                    text: ln.subtitle;
-                                    font-size: 12px;
-                                    // Expired reads red and expiring-within-a-day amber, so a row
-                                    // nobody will be able to open tomorrow does not look like one
-                                    // that never expires.
-                                    color: ln.tone == 2 ? (root.dark ? #ff6b6b : #c42b1c)
-                                         : ln.tone == 1 ? (root.dark ? #f9a825 : #8a5300)
-                                         : root.fg-3;
-                                }
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                            // Hover-revealed, so the resting state is one clean row of text. Words
-                            // rather than glyphs, same as the toolbar: these codepoints are not in
-                            // the UI font. The row's own left click already does the right thing;
-                            // these say what the right thing is, and add the one thing a row click
-                            // must never do.
-                            Rectangle {
-                                width: 30px; height: 26px;
-                                visible: rowta.has-hover;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Text {
-                                        text: ln.live ? "copy" : "new";
-                                        font-size: 10px;
-                                        color: ln.live ? root.fg-3 : root.accent;
-                                        horizontal-alignment: center;
-                                    }
-                                }
-                            }
-                            // Destructive actions go last and right, matching the menu, and go
-                            // through the same confirmation. This used to be a bare `\u{00d7}` that
-                            // called `delete-link` straight away: one small click, no question
-                            // asked, while the menu's "Delete link" asked first. A row should not
-                            // be able to do something the menu considers worth confirming.
-                            Rectangle {
-                                width: 40px; height: 26px;
-                                border-radius: 6px;
-                                visible: rowta.has-hover;
-                                background: deldta.has-hover
-                                    ? (root.dark ? #ff6b6b33 : #c42b1c1f)
-                                    : transparent;
-                                deldta := TouchArea {
-                                    mouse-cursor: MouseCursor.pointer;
-                                    clicked => {
-                                        root.confirm-kind = 1;
-                                        root.confirm-id = ln.id;
-                                        root.confirm-name = ln.name;
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    Text {
-                                        text: "delete";
-                                        font-size: 10px;
-                                        color: root.dark ? #ff6b6b : #c42b1c;
-                                        horizontal-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // The links above have a heading; these had none, so a file sitting on the bare
-                    // window surface next to a link sitting on a card read as two kinds of link and
-                    // nothing else. They are different objects from the console - one is a share, one
-                    // is a file - and the list has to say which is which.
-                    // `vertical-stretch: 0` on every item in this list, including the headings.
-                    // Stretching on a layout's axis is the default for Text as well as Rectangle,
-                    // so a heading with nothing else to fill the viewport grew to ~270px and drew
-                    // its words at the top of that box - which is the "large blank white spot" a
-                    // user saw after deleting the last file, and what made the file rows look like
-                    // they had fallen to the bottom of the window.
-                    // The files group is one layout of its own. Two sibling blocks in the parent
-                    // (an `if` heading and a `for` list) left ~270px of empty space between them
-                    // that no amount of `vertical-stretch: 0` on the children removed; as a single
-                    // atomic layout the leftover lands at the bottom of the list where it belongs.
+                    // One row per file, carrying its share state.
+                    //
+                    // This was two lists: SHARE LINKS IN THIS FOLDER above FILES IN THIS FOLDER, so
+                    // "SCSKiller-1.2.5.zip" appeared twice on one screen with two different menus -
+                    // the link row could delete the link, the file row could delete the link *and*
+                    // the file. That does not read as one object with two facts; it reads as two
+                    // objects, and leaves the user working out which one an action belongs to.
+                    //
+                    // `vertical-stretch: 0` on every item including the heading: stretching is the
+                    // default for Text as well as Rectangle, so a heading with nothing else to fill
+                    // the viewport grew to ~270px - the "blank white spot" seen after deleting the
+                    // last file. The group stays one atomic layout because an `if` heading and a
+                    // `for` list as siblings left that gap between them no child setting removed.
                     if root.entries.length > 0: VerticalLayout {
                         spacing: 4px;
-                        if root.entries.length > 0: Text {
+
+                        Text {
                             vertical-stretch: 0;
                             text: "FILES IN THIS FOLDER";
                             font-size: 10px;
@@ -655,19 +533,22 @@ export component App inherits Window {
                         }
 
                         for en in root.entries: Rectangle {
-                            height: 44px;
+                            height: 54px;
                             vertical-stretch: 0;
-                            border-radius: 6px;
-                            background: te.has-hover ? root.card-hi : transparent;
+                            border-radius: 8px;
+                            background: te.has-hover ? root.card-hi : root.card;
+                            accessible-role: AccessibleRole.list-item;
+                            accessible-label: en.name;
+                            accessible-description: en.sub;
+
                             te := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
-                                // A file row is not decoration. Left click does the one useful thing:
-                                // copy the link if there is one, make one if there is not. This used to
-                                // be `if en.is-dir` and nothing else, which is why files looked inert -
-                                // and they were drawn in the dimmest grey in the palette on top of that.
+                                // Left click does the one useful thing: open a folder, copy a live
+                                // link, replace an expired one, share what is not shared yet.
                                 clicked => {
                                     if en.is-dir { root.open-entry(en.path); }
-                                    else if en.link-id != "" { root.copy-link(en.link-id); }
+                                    else if en.live { root.copy-link(en.link-id); }
+                                    else if en.link-id != "" { root.re-share(en.link-id); }
                                     else { root.create-link(en.path); }
                                 }
                                 pointer-event(event) => {
@@ -679,7 +560,8 @@ export component App inherits Window {
                                         root.menu-id = en.link-id;
                                         root.menu-name = en.name;
                                         root.menu-direct = en.direct;
-                                        root.menu-exp = -1;
+                                        root.menu-live = en.live;
+                                        root.menu-exp = en.exp;
                                         root.menu-x = te.absolute-position.x + te.mouse-x
                                                     - root.absolute-position.x;
                                         root.menu-y = te.absolute-position.y + te.mouse-y
@@ -688,23 +570,35 @@ export component App inherits Window {
                                     }
                                 }
                             }
+
                             HorizontalLayout {
-                                spacing: 10px;
-                                padding-left: 10px;
+                                spacing: 12px;
+                                padding-left: 14px;
                                 padding-right: 12px;
+
                                 VerticalLayout {
+                                    spacing: 2px;
                                     alignment: center;
+
                                     Text {
                                         text: en.name;
                                         font-size: 14px;
-                                        color: root.fg;
+                                        color: en.is-dir || en.live ? root.fg : root.fg-2;
                                         overflow: elide;
                                     }
+                                    Text {
+                                        // The share state, in the tones the link rows already used:
+                                        // red when nobody can open it, amber within a day.
+                                        text: en.is-dir ? "" : en.sub;
+                                        font-size: 12px;
+                                        color: en.tone == 2 ? (root.dark ? #ff6b6b : #c42b1c)
+                                             : en.tone == 1 ? (root.dark ? #f9a825 : #8a5300)
+                                             : root.fg-3;
+                                    }
                                 }
-                                // `horizontal-stretch`, not `vertical-stretch`: this is a HorizontalLayout,
-                                // and a stretch on the cross axis is what let a 44px row grow to fill the
-                                // list.
+
                                 Rectangle { horizontal-stretch: 1; }
+
                                 Rectangle {
                                     width: 34px; height: 26px;
                                     visible: te.has-hover;
@@ -712,31 +606,187 @@ export component App inherits Window {
                                         alignment: center;
                                         Text {
                                             text: en.is-dir ? "open"
-                                                            : (en.link-id != "" ? "copy" : "link");
+                                                  : en.live ? "copy"
+                                                  : en.link-id != "" ? "new" : "link";
                                             font-size: 10px;
-                                            color: root.fg-3;
+                                            color: (en.is-dir || en.live) ? root.fg-3 : root.accent;
                                             horizontal-alignment: center;
                                         }
                                     }
                                 }
-                                // Folders are the exception, and deliberately so: macOS offers no
-                                // delete for anything but a link, and a recursive folder delete is
-                                // the one destructive call here that has never been tried against a
-                                // console. So it is absent rather than guessed at - not absent for
-                                // files, which is what made this look like an oversight.
-                                if !en.is-dir: Rectangle {
-                                    width: 40px; height: 26px;
+
+                                // The whole menu, on every row, without needing to know a right
+                                // button exists. Delete lives in the menu rather than on the row
+                                // because a merged row has two different deletes - the link and the
+                                // file - and one button cannot mean both.
+                                Rectangle {
+                                    width: 26px; height: 26px;
                                     border-radius: 6px;
                                     visible: te.has-hover;
-                                    background: fdelta.has-hover
-                                        ? (root.dark ? #ff6b6b33 : #c42b1c1f)
+                                    background: moreta.has-hover
+                                        ? (root.dark ? #ffffff2e : #0000001a)
                                         : transparent;
-                                    fdelta := TouchArea {
+
+                                    moreta := TouchArea {
                                         mouse-cursor: MouseCursor.pointer;
                                         clicked => {
-                                            root.confirm-kind = 2;
-                                            root.confirm-path = en.path;
-                                            root.confirm-name = en.name;
+                                            root.menu-entry = true;
+                                            root.menu-dir = en.is-dir;
+                                            root.menu-path = en.path;
+                                            root.menu-id = en.link-id;
+                                            root.menu-name = en.name;
+                                            root.menu-direct = en.direct;
+                                            root.menu-live = en.live;
+                                            root.menu-exp = en.exp;
+                                            // Anchored to the row, not to the pointer: this child
+                                            // takes the hover, so the row's own mouse-x is stale by
+                                            // the time it fires.
+                                            root.menu-x = te.absolute-position.x + te.width
+                                                        - root.absolute-position.x - 200px;
+                                            root.menu-y = te.absolute-position.y + te.height
+                                                        - root.absolute-position.y;
+                                            ctx.show();
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Text {
+                                            text: "\u{2026}";
+                                            font-size: 14px;
+                                            color: root.fg-2;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Links whose file is not in this folder - the only case left where a link
+                    // stands alone. The file has moved or gone and the URL still works out there, so
+                    // these stay visible: hiding them turns "that link is dead now" into a mystery
+                    // instead of a fact you can act on.
+                    if root.links.length > 0: VerticalLayout {
+                        spacing: 4px;
+
+                        Text {
+                            vertical-stretch: 0;
+                            text: "LINKS WITH NO FILE IN THIS FOLDER";
+                            font-size: 10px;
+                            font-weight: 600;
+                            color: root.fg-3;
+                        }
+
+                        for ln in root.links: Rectangle {
+                            height: 54px;
+                            // A Rectangle in a layout stretches on the layout's axis by default, so
+                            // "54px" was only a wish: with a short list the rows absorbed the empty
+                            // viewport and grew to 78px, with a long one they fought each other. Pin
+                            // them and let the leftover sit at the bottom of the list where it belongs.
+                            vertical-stretch: 0;
+                            border-radius: 8px;
+                            background: rowta.has-hover ? root.card-hi : root.card;
+                            // Named for assistive tech — and because a row you cannot address by name
+                            // cannot be right-clicked by a test either, which is how this app's context
+                            // menu went unverified for a day.
+                            accessible-role: AccessibleRole.list-item;
+                            accessible-label: ln.name;
+                            accessible-description: ln.subtitle;
+                            rowta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                // `clicked` fires for a finger or the **left** button only, so the
+                                // right button has to come from `pointer-event`. On the release rather
+                                // than the press, matching how a native menu appears.
+                                clicked => {
+                                    if ln.live { root.copy-link(ln.id); }
+                                    else { root.re-share(ln.id); }
+                                }
+                                pointer-event(event) => {
+                                    // `PointerEventButton` / `PointerEventKind`, not `MouseButton` —
+                                    // the latter does not exist in 1.18, and the popup's x/y are
+                                    // window-relative, so the row's own mouse position has to be
+                                    // shifted by the difference of absolutes (the idiom Slint's own
+                                    // listview uses).
+                                    if (event.button == PointerEventButton.right
+                                        && event.kind == PointerEventKind.up) {
+                                        root.menu-id = ln.id;
+                                        root.menu-name = ln.name;
+                                        root.menu-live = ln.live;
+                                        root.menu-entry = false;
+                                        root.menu-direct = ln.direct;
+                                        root.menu-exp = ln.exp;
+                                        root.menu-dir = false;
+                                        root.menu-path = "";
+                                        root.menu-x = rowta.absolute-position.x + rowta.mouse-x
+                                                    - root.absolute-position.x;
+                                        root.menu-y = rowta.absolute-position.y + rowta.mouse-y
+                                                    - root.absolute-position.y;
+                                        ctx.show();
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                padding-left: 14px;
+                                padding-right: 12px;
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    alignment: center;
+                                    Text {
+                                        text: ln.name;
+                                        font-size: 14px;
+                                        color: ln.live ? root.fg : root.fg-2;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: ln.subtitle;
+                                        font-size: 12px;
+                                        // Expired reads red and expiring-within-a-day amber, so a row
+                                        // nobody will be able to open tomorrow does not look like one
+                                        // that never expires.
+                                        color: ln.tone == 2 ? (root.dark ? #ff6b6b : #c42b1c)
+                                             : ln.tone == 1 ? (root.dark ? #f9a825 : #8a5300)
+                                             : root.fg-3;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                // Hover-revealed, so the resting state is one clean row of text. Words
+                                // rather than glyphs, same as the toolbar: these codepoints are not in
+                                // the UI font. The row's own left click already does the right thing;
+                                // these say what the right thing is, and add the one thing a row click
+                                // must never do.
+                                Rectangle {
+                                    width: 30px; height: 26px;
+                                    visible: rowta.has-hover;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Text {
+                                            text: ln.live ? "copy" : "new";
+                                            font-size: 10px;
+                                            color: ln.live ? root.fg-3 : root.accent;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                                // Destructive actions go last and right, matching the menu, and go
+                                // through the same confirmation. This used to be a bare `\u{00d7}` that
+                                // called `delete-link` straight away: one small click, no question
+                                // asked, while the menu's "Delete link" asked first. A row should not
+                                // be able to do something the menu considers worth confirming.
+                                Rectangle {
+                                    width: 40px; height: 26px;
+                                    border-radius: 6px;
+                                    visible: rowta.has-hover;
+                                    background: deldta.has-hover
+                                        ? (root.dark ? #ff6b6b33 : #c42b1c1f)
+                                        : transparent;
+                                    deldta := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => {
+                                            root.confirm-kind = 1;
+                                            root.confirm-id = ln.id;
+                                            root.confirm-name = ln.name;
                                         }
                                     }
                                     VerticalLayout {
@@ -752,7 +802,22 @@ export component App inherits Window {
                             }
                         }
 
+                        // The links above have a heading; these had none, so a file sitting on the bare
+                        // window surface next to a link sitting on a card read as two kinds of link and
+                        // nothing else. They are different objects from the console - one is a share, one
+                        // is a file - and the list has to say which is which.
+                        // `vertical-stretch: 0` on every item in this list, including the headings.
+                        // Stretching on a layout's axis is the default for Text as well as Rectangle,
+                        // so a heading with nothing else to fill the viewport grew to ~270px and drew
+                        // its words at the top of that box - which is the "large blank white spot" a
+                        // user saw after deleting the last file, and what made the file rows look like
+                        // they had fallen to the bottom of the window.
+                        // The files group is one layout of its own. Two sibling blocks in the parent
+                        // (an `if` heading and a `for` list) left ~270px of empty space between them
+                        // that no amount of `vertical-stretch: 0` on the children removed; as a single
+                        // atomic layout the leftover lands at the bottom of the list where it belongs.
                     }
+
                     // Reported, never hidden — same reason the macOS popover says it.
                     if root.elsewhere > 0: Text {
                         vertical-stretch: 0;
@@ -861,11 +926,17 @@ export component App inherits Window {
                         hi: root.card-hi;
                         picked => { root.open-entry(root.menu-path); ctx.close(); }
                     }
+                    // An expired link is not copyable — the URL is out there and 403s — so the row
+                    // becomes the thing that actually helps, same as the standalone link menu.
                     if !root.menu-dir && root.menu-id != "": MenuRow {
-                        label: "Copy link";
-                        fg: root.fg;
+                        label: root.menu-live ? "Copy link" : "New link";
+                        fg: root.menu-live ? root.fg : root.accent;
                         hi: root.card-hi;
-                        picked => { root.copy-link(root.menu-id); ctx.close(); }
+                        picked => {
+                            if root.menu-live { root.copy-link(root.menu-id); }
+                            else { root.re-share(root.menu-id); }
+                            ctx.close();
+                        }
                     }
                     if !root.menu-dir && root.menu-direct != "": MenuRow {
                         label: "Copy direct link";
@@ -902,6 +973,15 @@ export component App inherits Window {
                             ctx.close();
 
                         }
+                    }
+                    // A file with no link still needs the menu to say so usefully. This row was
+                    // missing, so an unshared file's menu was a lone "Delete file" — the one action
+                    // nobody opens a menu to find — while `menu-rows` sized the card for two.
+                    if !root.menu-dir && root.menu-id == "": MenuRow {
+                        label: "Create share link";
+                        fg: root.accent;
+                        hi: root.card-hi;
+                        picked => { root.create-link(root.menu-path); ctx.close(); }
                     }
                     if !root.menu-dir: MenuRow {
                         label: "Delete file";

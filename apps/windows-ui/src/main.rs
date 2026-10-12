@@ -12,7 +12,7 @@
 
 slint::include_modules!();
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -1265,9 +1265,13 @@ fn load(s: &Arc<State>, c: Client, folder: String) {
         Err(e) => { let _ = s.tx.send(Msg::Status(format!("{e}"))); }
     }
 
-    // file_id -> (link id, direct URL). Built from the same fetch as the link rows, so a file's row
-    // and the link list can never disagree about whether something is shared.
-    let mut link_of: HashMap<String, (String, String)> = HashMap::new();
+    // file path -> the row that its link would make. Built from the same fetch as the link rows and
+    // then copied onto the file rows, so a file and its share can never disagree about expiry, tone
+    // or whether it is live at all.
+    let mut link_of: HashMap<String, Link> = HashMap::new();
+    // Links in the folder being shown, as rows. Kept until the browse comes back, because only the
+    // two of them together say which links duplicate a file row and which are orphans.
+    let mut here: Vec<Link> = Vec::new();
 
     match c.list_links() {
         Ok(links) => {
@@ -1275,43 +1279,70 @@ fn load(s: &Arc<State>, c: Client, folder: String) {
                 let mut map = s.by_id.lock().unwrap();
                 for l in &links {
                     map.insert(l.id.clone(), l.clone());
-                    link_of.entry(l.file_id.clone()).or_insert_with(|| (
-                        l.id.clone(),
-                        l.direct_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
-                    ));
+                    link_of.entry(l.file_id.clone())
+                    .or_insert_with(|| row_for(l));
                 }
             }
             // Only this folder's links, which is what makes the folder field mean something. The
             // macOS popover used to list every link on the drive, so a link copied from it had no
             // relation to the folder on screen; the count of what was left out is reported rather
             // than silently dropped, so "where is my link?" has an answer.
-            let mut here: Vec<&ShareItem> = links
+            let mut picked: Vec<&ShareItem> = links
                 .iter()
                 .filter(|l| l.file_id == prefix || l.file_id.starts_with(&format!("{prefix}/")))
                 .collect();
             // Newest first. The id tie-break is not decoration: two rows created in the same second
             // would otherwise swap places on a refresh and move a different row under the cursor.
-            here.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+            picked.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+            here = picked.iter().map(|l| row_for(l)).collect();
 
-            let rows: Vec<Link> = here.iter().map(|i| row_for(i)).collect();
-            let _ = s.tx.send(Msg::Links(rows));
             let _ = s.tx.send(Msg::Elsewhere((links.len() - here.len()) as i32));
         }
         Err(e) => { let _ = s.tx.send(Msg::Status(format!("{e}"))); }
     }
 
+    // One row per file, carrying its share state, rather than the file in one list and its link in
+    // another. The two-list layout showed `SCSKiller-1.2.5.zip` twice on the same screen with two
+    // different menus - one of which could delete the file - and no amount of heading text made that
+    // read as two facts about one thing rather than two things.
+    //
     // A failed refresh leaves the previous listing on screen rather than blanking it.
-    if let Ok(entries) = c.browse(&folder) {
-        let rows: Vec<Entry> = entries.iter().map(|e| Entry {
-            name: e.name.clone().into(),
-            path: e.path.clone().into(),
-            is_dir: e.is_dir,
-            // Which files already have a link decides whether the row offers "create link" or
-            // "copy link", and stops the menu from offering a share that would come back 403.
-            link_id: link_of.get(&e.path).map(|(id, _)| id.clone()).unwrap_or_default().into(),
-            direct: link_of.get(&e.path).map(|(_, d)| d.clone()).unwrap_or_default().into(),
-        }).collect();
-        let _ = s.tx.send(Msg::Entries(rows));
+    match c.browse(&folder) {
+        Ok(entries) => {
+            let rows: Vec<Entry> = entries.iter().map(|e| {
+                let l = link_of.get(&e.path);
+                Entry {
+                    name: e.name.clone().into(),
+                    path: e.path.clone().into(),
+                    is_dir: e.is_dir,
+                    // Which files already have a link decides whether the row offers "create link"
+                    // or "copy link", and stops the menu from offering a share that would come back
+                    // 403.
+                    link_id: l.map(|l| l.id.clone()).unwrap_or_default(),
+                    direct: l.map(|l| l.direct.clone()).unwrap_or_default(),
+                    sub: l.map(|l| l.subtitle.clone()).unwrap_or_default(),
+                    tone: l.map(|l| l.tone).unwrap_or(0),
+                    exp: l.map(|l| l.exp).unwrap_or(-1),
+                    live: l.map(|l| l.live).unwrap_or(false),
+                }
+            }).collect();
+            let _ = s.tx.send(Msg::Entries(rows));
+
+            // A link with no file row is not a duplicate of anything - the file it pointed at has
+            // moved or gone, and the URL is still out there. Those keep a section of their own,
+            // because hiding a link is how a 403 ends up on someone's clipboard.
+            let seen: HashSet<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+            let orphans: Vec<Link> = here.iter()
+                .filter(|l| !seen.contains(l.path.as_str()))
+                .cloned()
+                .collect();
+            let _ = s.tx.send(Msg::Links(orphans));
+        }
+        // A browse that did not answer says nothing about the files, so every link here stays
+        // listed rather than being declared orphaned by a failed request.
+        Err(_) => {
+            let _ = s.tx.send(Msg::Links(here));
+        }
     }
 
     let _ = s.tx.send(Msg::Busy(false));
@@ -1447,6 +1478,7 @@ fn row_for(i: &ShareItem) -> Link {
         direct: i.direct_url.as_ref().map(|u| u.to_string()).unwrap_or_default().into(),
         tone,
         exp,
+        path: i.file_id.clone().into(),
     }
 }
 
@@ -1557,12 +1589,17 @@ mod upload_tests {
         upload_all(Arc::clone(&st), vec![f.clone()], "/Public".into(),
                    drivedrop::models::Expiration::SevenDays, false);
 
+        // The contract is on the file's row, not on a separate link list: one row per file, and it
+        // arrives already knowing it is shared.
+        let mut rows: Vec<Entry> = Vec::new();
         let mut links: Vec<Link> = Vec::new();
         let mut status = String::from("unset");
         let mut toast = String::new();
+        let name = "drivedrop-upload-test";
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Msg::Entries(v)) => rows = v,
                 Ok(Msg::Links(v)) => links = v,
                 Ok(Msg::Status(s)) => status = s,
                 Ok(Msg::Toast(t)) => toast = t,
@@ -1570,15 +1607,25 @@ mod upload_tests {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => break,
             }
-            if !links.is_empty() && status.is_empty() && !toast.is_empty() { break; }
+            let shared = rows.iter()
+                .any(|e| e.name.starts_with(name) && e.live && !e.link_id.is_empty());
+            if shared && status.is_empty() && !toast.is_empty() { break; }
         }
         let _ = std::fs::remove_file(&f);
 
-        assert!(!links.is_empty(),
-                "the uploaded file must appear in the link list with no manual refresh");
-        assert!(links.iter().any(|l| l.name.starts_with("drivedrop-upload-test")),
-                "the new file's row must be among the links shown, got {:?}",
-                links.iter().map(|l| l.name.to_string()).collect::<Vec<_>>());
+        let seen: Vec<String> = rows.iter().map(|e| e.name.to_string()).collect();
+        let row = rows.iter().find(|e| e.name.starts_with(name))
+            .unwrap_or_else(|| panic!("the uploaded file must appear in the listing with no manual refresh, got {seen:?}"));
+        assert!(!row.link_id.is_empty(),
+                "the new file's row must carry its share link, not just its name");
+        assert!(row.live && row.sub.contains("expires"),
+                "the row has to say it is shared and until when, got {:?}", row.sub);
+        let dup: Vec<String> = links.iter()
+            .filter(|l| l.name.starts_with(name))
+            .map(|l| l.name.to_string())
+            .collect();
+        assert!(dup.is_empty(),
+                "a file with its own row must not also be listed as a standalone link, got {dup:?}");
         assert!(toast.contains("shared"), "the toast must report a real share, got {toast:?}");
         assert_eq!(status, "", "the status line must not stay on \"Uploading…\"");
     }
