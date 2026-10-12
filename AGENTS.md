@@ -329,6 +329,13 @@ instead of guessing turned up four gaps, all now closed except drag-and-drop:
   once the drop lands — an uploader that empties someone's Downloads folder is a data-loss bug.
 - **The HWND is two calls out of Slint:** `ui.window().window_handle().window_handle()` — the first
   returns Slint's handle, which implements `HasWindowHandle`, and only the second is the raw one.
+- **`--demo` opens straight into the sample console** (same callback as a blank Connect). Added
+  because hover-revealed row buttons could not be verified any other way: the list only exists after
+  a click, and a click needs coordinates.
+- **Synthetic hover is unreliable here.** `SetCursorPos` produced no `has-hover` state in the app
+  across attempts, and `GetWindowRect` reported different window origins between launches for the
+  same window — DPI virtualization plus window moves. Force the property to `true` for a screenshot
+  instead of fighting the pointer.
 - **UIA rectangles for content inside a Slint `PopupWindow` go stale** when the window grows to fit
   the popup: it reported the "Use demo data" box 200px from where it is drawn. A window capture is
   ground truth and maps 1:1 through `GetWindowRect`, so measure on the capture for anything inside a

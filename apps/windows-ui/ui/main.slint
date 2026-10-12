@@ -578,42 +578,51 @@ export component App inherits Window {
                                          : root.fg-3;
                                 }
                             }
-                            Rectangle { vertical-stretch: 1; }
-                            // Hover-revealed, so the resting state is one clean row of text.
+                            Rectangle { horizontal-stretch: 1; }
+                            // Hover-revealed, so the resting state is one clean row of text. Words
+                            // rather than glyphs, same as the toolbar: these codepoints are not in
+                            // the UI font. The row's own left click already does the right thing;
+                            // these say what the right thing is, and add the one thing a row click
+                            // must never do.
                             Rectangle {
-                                width: 26px; height: 26px;
-                                border-radius: 6px;
+                                width: 30px; height: 26px;
                                 visible: rowta.has-hover;
-                                background: delta.has-hover ? (root.dark ? #ffffff2e : #0000001a)
-                                                            : transparent;
-                                delta := TouchArea {
-                                    mouse-cursor: MouseCursor.pointer;
-                                    clicked => { root.delete-link(ln.id); }
-                                }
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        // U+00D7 rather than U+2715: the multiplication sign is in
-                                        // every UI font, the heavy multiplication sign is not.
-                                        text: "\u{00d7}";
-                                        font-size: 14px;
-                                        color: root.fg-3;
+                                        text: ln.live ? "copy" : "new";
+                                        font-size: 10px;
+                                        color: ln.live ? root.fg-3 : root.accent;
                                         horizontal-alignment: center;
                                     }
                                 }
                             }
+                            // Destructive actions go last and right, matching the menu, and go
+                            // through the same confirmation. This used to be a bare `\u{00d7}` that
+                            // called `delete-link` straight away: one small click, no question
+                            // asked, while the menu's "Delete link" asked first. A row should not
+                            // be able to do something the menu considers worth confirming.
                             Rectangle {
-                                width: 26px; height: 26px;
+                                width: 40px; height: 26px;
+                                border-radius: 6px;
                                 visible: rowta.has-hover;
+                                background: deldta.has-hover
+                                    ? (root.dark ? #ff6b6b33 : #c42b1c1f)
+                                    : transparent;
+                                deldta := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        root.confirm-kind = 1;
+                                        root.confirm-id = ln.id;
+                                        root.confirm-name = ln.name;
+                                    }
+                                }
                                 VerticalLayout {
                                     alignment: center;
                                     Text {
-                                        // Words for the same reason as the toolbar: these codepoints
-                                        // are not in the UI font. The row's own click already does
-                                        // the right thing; this only says what the right thing is.
-                                        text: ln.live ? "copy" : "new";
+                                        text: "delete";
                                         font-size: 10px;
-                                        color: ln.live ? root.fg-3 : root.accent;
+                                        color: root.dark ? #ff6b6b : #c42b1c;
                                         horizontal-alignment: center;
                                     }
                                 }
@@ -706,6 +715,36 @@ export component App inherits Window {
                                                             : (en.link-id != "" ? "copy" : "link");
                                             font-size: 10px;
                                             color: root.fg-3;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                                // Folders are the exception, and deliberately so: macOS offers no
+                                // delete for anything but a link, and a recursive folder delete is
+                                // the one destructive call here that has never been tried against a
+                                // console. So it is absent rather than guessed at - not absent for
+                                // files, which is what made this look like an oversight.
+                                if !en.is-dir: Rectangle {
+                                    width: 40px; height: 26px;
+                                    border-radius: 6px;
+                                    visible: te.has-hover;
+                                    background: fdelta.has-hover
+                                        ? (root.dark ? #ff6b6b33 : #c42b1c1f)
+                                        : transparent;
+                                    fdelta := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => {
+                                            root.confirm-kind = 2;
+                                            root.confirm-path = en.path;
+                                            root.confirm-name = en.name;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Text {
+                                            text: "delete";
+                                            font-size: 10px;
+                                            color: root.dark ? #ff6b6b : #c42b1c;
                                             horizontal-alignment: center;
                                         }
                                     }

@@ -171,10 +171,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = ui.window().hide();
     }
 
+    // `--demo`: open straight into the sample console. Nobody with a real console needs it — the
+    // same state is one blank press of Connect away. It exists because a window that only shows
+    // its list after a mouse click at coordinates is a window nothing else can look at: no
+    // screenshot script, no reviewer without the app built, no one checking whether a row's
+    // delete button is where it should be.
+    let demo_at_start = std::env::args().any(|a| a == "--demo");
+
     let (tx, rx) = channel::<Msg>();
     let st = Arc::new(State { client: Mutex::new(None), by_id: Mutex::new(HashMap::new()), pending: Mutex::new(Vec::new()), tx });
 
     wire(&ui, &st);
+
+    if demo_at_start {
+        // The same callback the Connect button fires, not a parallel demo path — the two would
+        // disagree about what "demo" means, which is the bug the sign-out card already had.
+        ui.invoke_sign_in("".into(), "".into(), "".into(), ui.get_insecure());
+    }
 
     // Drag-and-drop from Explorer, registered from a one-shot timer rather than inline: the HWND
     // does not exist until the event loop has created the window, and a window that silently never
