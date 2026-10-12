@@ -1,0 +1,9 @@
+[package]
+name = "icon-gen"
+version = "0.1.0"
+edition = "2021"
+description = "Generates apps/windows-ui/icons/drivedrop.ico from the master PNG"
+publish = false
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }

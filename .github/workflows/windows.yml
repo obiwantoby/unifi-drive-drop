@@ -62,6 +62,14 @@ jobs:
             exit 1
           }
 
+      # The identity scrub cleaned `main` while the raw capture stayed reachable from refs the
+      # branch-scanning never looked at. This one runs at the repo root, over every tracked file.
+      - name: Check for published PII shapes
+        shell: bash
+        run: |
+          bash tools/check-pii.sh --selftest   # a check that cannot be shown to fire is not a check
+          bash tools/check-pii.sh
+
       # Fails the build on any warning, so the cross-platform vibrancy path cannot rot quietly.
       - name: Check for warnings
         working-directory: apps/windows-ui

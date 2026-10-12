@@ -15,7 +15,10 @@ drivedrop = { path = "../windows" }
 #
 # raw-window-handle-06 is not on by default, and without it Slint exposes no way to reach the
 # HWND, which is what window-vibrancy needs.
-slint = { version = "1", features = ["raw-window-handle-06"] }
+# `system-tray` pulls in Slint's own tray backend (tray-icon on Windows) so the tray is declared
+# in main.slint rather than wired by hand; `raw-window-handle-06` is what window-vibrancy needs to
+# reach the HWND, and is not on by default.
+slint = { version = "1", features = ["raw-window-handle-06", "system-tray"] }
 
 # Windows 11 Mica backdrop. Called on every platform rather than behind `cfg(windows)` so macOS
 # type-checks the exact expression that runs on Windows; off Windows it returns `Unsupported`.
@@ -29,6 +32,32 @@ arboard = "3"
 
 # Expiry maths and the "expires 12 Jun, 14:05" formatting.
 chrono = "0.4"
+
+# Windows only: the registry read behind the light/dark palette. Same pin as the API crate.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    # Drag-and-drop: IDropTarget on the HWND, CF_HDROP payloads, and the shell's file enumeration.
+    # `implement` is what generates the COM vtable behind `#[implement(IDropTarget)]`; without it
+    # the `_Impl` traits are configured out and the error reads like the interface is missing.
+    # `STGMEDIUM` hides behind two more features than its module name suggests.
+    "implement",
+    "Win32_System_Ole",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_SystemServices",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+] }
+
+# Already in the tree via Slint; named here to read the HWND out of Slint's window handle.
+raw-window-handle = "0.6"
+
+# `#[implement]` expands to paths under `windows_core::`, so the macro needs that crate reachable
+# under that exact name - `windows::core` is the same code, not the same path. Same version `windows`
+# 0.58 already pulls in, so this adds no compilation.
+windows-core = "0.58"
 
 [features]
 # Text clarity, Windows. Slint rasterises glyphs itself — neither ClearType (a GDI subpixel

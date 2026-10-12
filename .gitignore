@@ -11,7 +11,12 @@ apps/macos/build/
 apps/windows/target/
 *.app/
 
-# captured responses are intentional, but not the scratch ones
+# Captured console responses: these are what leaked (device MACs, users, serials). The spec is the
+# product, not the captures — see tools/check-pii.sh, which fails CI if any of this is tracked.
+spec/raw/
+*.jsonl
+
+# scratch
 /tmp/
 .DS_Store
 
@@ -30,3 +35,8 @@ apps/macos/dist/
 
 # Rust build output, at any depth (apps/windows, apps/windows-ui, ...)
 target/
+
+# Window captures taken by tools/shot*.ps1 while driving the UI. They are evidence, not source,
+# and they can contain whatever was on screen - including a real console address.
+/*.png
+/*.png-*.png

@@ -135,9 +135,7 @@ pub fn wait_until_visible(base: &str, token: Option<&str>, qualified_path: &str,
 /// path typed, pasted or reconstructed from what you can see does not match the real one
 /// and the console answers 404.
 pub fn fold_invisible(s: &str) -> String {
-    s.replace('\u{202F}', " ")
-        .replace('\u{00A0}', " ")
-        .replace('\u{2007}', " ")
+    s.replace(['\u{202F}', '\u{00A0}', '\u{2007}'], " ")
         .replace('\u{FEFF}', "")
         .trim()
         .to_string()
@@ -307,7 +305,7 @@ impl LiveClient {
         Ok(r)
     }
 
-    fn require_ok<'a>(&self, r: &'a Resp, what: &str) -> Result<Value> {
+    fn require_ok(&self, r: &Resp, what: &str) -> Result<Value> {
         if !(200..=299).contains(&r.status) {
             let msg = r
                 .json()
@@ -663,7 +661,8 @@ impl LiveClient {
     pub fn session(&self) -> Option<(String, String, i64)> {
         let t = self.token.lock().unwrap().clone()?;
         let c = self.csrf.lock().unwrap().clone()?;
-        let e = self.token_expire.lock().unwrap().clone()?;
+        // Copy, not clone: `Option<i64>` does not need the clone clippy would flag.
+        let e = (*self.token_expire.lock().unwrap())?;
         Some((t, c, e))
     }
 
@@ -697,6 +696,14 @@ impl LiveClient {
 /// `demo.invalid` (RFC 2606) so a fake link can never be pasted and look real.
 pub struct MockClient {
     store: Mutex<Vec<ShareItem>>,
+    /// Files put there by `upload`, so the demo's Files list behaves like the console's: an upload
+    /// appears in the folder it was aimed at and in no other. A mock that answers every `browse`
+    /// with the same two fixtures cannot show whether the folder argument reached the server, which
+    /// is the whole point of the demo.
+    uploaded: Mutex<Vec<FileEntry>>,
+    /// Paths moved to trash by `delete_file`. Kept rather than dropped, because that is what a
+    /// trash does, and listings must stop showing them.
+    trashed: Mutex<Vec<String>>,
 }
 
 impl MockClient {
@@ -718,6 +725,8 @@ impl MockClient {
                 mk("1", "site-plan.pdf", 2_411_724, 7_200, 3 * 86_400),
                 mk("2", "garage-clip.mov", 92_274_688, 86_400, 2_400),
             ]),
+            uploaded: Mutex::new(Vec::new()),
+            trashed: Mutex::new(Vec::new()),
         }
     }
 }
@@ -735,24 +744,67 @@ impl DriveClient for MockClient {
     fn usage(&self) -> Result<Usage> {
         Ok(Usage { used_bytes: 3_724_542_208, total_bytes: 15_999_766_528 })
     }
-    fn browse(&self, _dir: &str) -> Result<Vec<FileEntry>> {
-        Ok(vec![
+    fn browse(&self, dir: &str) -> Result<Vec<FileEntry>> {
+        // Same folder rule the live client applies: fixtures live under /Public, and an upload is
+        // visible only in the directory it was written to.
+        //
+        // Entry paths are drive-qualified (`/mydrive/Public/x`) while `dir` arrives personal-
+        // relative (`/Public`), so the drive prefix has to come off the parent before comparing.
+        // Comparing the raw parent instead silently matched nothing - which is exactly how the Files
+        // list vanished from the demo while the links still showed, and why this has a test now.
+        let want = dir.trim().trim_matches('/');
+        let in_dir = |p: &str| -> bool {
+            let parent = p.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
+            parent.strip_prefix("/mydrive").unwrap_or(parent).trim_matches('/') == want
+        };
+        let fixtures = [
             FileEntry { name: "Documents".into(), path: "/mydrive/Public/Documents".into(), is_dir: true, size: 0, modified: None },
             FileEntry { name: "site-plan.pdf".into(), path: "/mydrive/Public/site-plan.pdf".into(), is_dir: false, size: 2_411_724, modified: None },
-        ])
+            // Every link in the demo has a file behind it, as it would on a real console. With this
+            // row missing, the sample listing filed `garage-clip.mov` under "links with no file in
+            // this folder" - a section that should be rare - so the demo showed a shape no real
+            // console produces and made the odd case look normal.
+            FileEntry { name: "garage-clip.mov".into(), path: "/mydrive/Public/garage-clip.mov".into(), is_dir: false, size: 92_274_688, modified: None },
+        ];
+        let trashed = self.trashed.lock().unwrap();
+        let kept = |e: &FileEntry| in_dir(&e.path) && !trashed.iter().any(|t| t == &e.path);
+        let mut out: Vec<FileEntry> = fixtures.into_iter().filter(|e| kept(e)).collect();
+        out.extend(self.uploaded.lock().unwrap().iter().filter(|e| kept(e)).cloned());
+        Ok(out)
     }
     fn list_links(&self) -> Result<Vec<ShareItem>> {
         Ok(self.store.lock().unwrap().clone())
     }
-    fn upload(&self, path: &Path, _folder: &str, progress: &(dyn Fn(f32) + Send + Sync)) -> Result<ShareItem> {
+    fn upload(&self, path: &Path, folder: &str, progress: &(dyn Fn(f32) + Send + Sync)) -> Result<ShareItem> {
+        // Mirror the live client, which reads the file first and fails on a bad path. A mock that
+        // "uploads" a file that does not exist turns every upload test into a test of nothing, and
+        // it is how this mock once hid a wrong path argument.
+        let data = std::fs::read(path)
+            .map_err(|e| DriveError::Unsupported(format!("cannot read {}: {e}", path.display())))?;
         for i in 1..=10 {
             std::thread::sleep(std::time::Duration::from_millis(40));
             progress(i as f32 / 10.0);
         }
         let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        // Honour the folder the caller asked for. A mock that always answers `/Public` hides a
+        // wrong folder argument, which is exactly the class of bug that ends with files in a
+        // directory nobody chose.
+        let dir = folder.trim().trim_matches('/');
+        let file_id = if dir.is_empty() {
+            format!("/mydrive/{name}")
+        } else {
+            format!("/mydrive/{dir}/{name}")
+        };
+        self.uploaded.lock().unwrap().push(FileEntry {
+            name: name.clone(),
+            path: file_id.clone(),
+            is_dir: false,
+            size: data.len() as i64,
+            modified: None,
+        });
         Ok(ShareItem {
             id: format!("demo-{}", uuid::Uuid::new_v4()),
-            file_id: format!("/mydrive/Public/{name}"),
+            file_id,
             name,
             size: 0,
             share_url: None,
@@ -798,7 +850,14 @@ impl DriveClient for MockClient {
         self.store.lock().unwrap().retain(|i| i.id != link_id);
         Ok(())
     }
-    fn delete_file(&self, _qualified_path: &str) -> Result<()> {
+    /// Soft delete, like the console: the object goes to trash and leaves every listing, and the
+    /// link that pointed at it dies with it. A no-op here means the demo shows a file that the user
+    /// just deleted still sitting in the folder, which teaches the wrong lesson about the button.
+    fn delete_file(&self, qualified_path: &str) -> Result<()> {
+        let mut t = self.trashed.lock().unwrap();
+        if !t.iter().any(|p| p == qualified_path) { t.push(qualified_path.to_string()); }
+        drop(t);
+        self.store.lock().unwrap().retain(|l| l.file_id != qualified_path);
         Ok(())
     }
 }
@@ -920,5 +979,63 @@ mod tests {
 
         // And targeting a link that no longer exists is an error, not a silent no-op.
         assert!(c.set_expiration(&first.id, Expiration::OneHour).is_err());
+    }
+
+    /// Deleting a file takes its link with it, and the file leaves every listing.
+    #[test]
+    fn mock_delete_file_trashes_the_file_and_kills_its_link() {
+        let c = MockClient::new();
+        let before = c.list_links().unwrap().len();
+        assert!(c.browse("/Public").unwrap().iter().any(|e| e.name == "site-plan.pdf"));
+
+        c.delete_file("/mydrive/Public/site-plan.pdf").unwrap();
+
+        assert!(!c.browse("/Public").unwrap().iter().any(|e| e.name == "site-plan.pdf"),
+                "a trashed file must not still be listed");
+        assert_eq!(c.list_links().unwrap().len(), before - 1,
+                   "the link pointing at a trashed file must be gone too");
+        // Trashing twice is not an error - the console is idempotent about it.
+        assert!(c.delete_file("/mydrive/Public/site-plan.pdf").is_ok());
+    }
+
+    /// The demo's Files list is the only place a folder-scoped browse is visible without a real
+    /// console, and a wrong comparison here empties it silently - links still render, so nothing
+    /// looks broken. This is the test for the bug that did exactly that.
+    #[test]
+    fn mock_browse_answers_only_the_folder_it_was_asked_about() {
+        let c = MockClient::new();
+
+        let public: Vec<String> = c.browse("/Public").unwrap().iter()
+            .map(|e| e.name.clone()).collect();
+        assert!(public.contains(&"Documents".to_string()), "fixtures live under /Public, got {public:?}");
+        assert!(public.contains(&"site-plan.pdf".to_string()));
+
+        // Trailing slash and the bare root are the two forms the UI actually sends.
+        assert_eq!(c.browse("/Public/").unwrap().len(), public.len());
+        assert!(c.browse("/").unwrap().is_empty(), "nothing sits at the drive root in the demo");
+        assert!(c.browse("/Private").unwrap().is_empty());
+    }
+
+    /// An upload must show up where it was put and nowhere else - the folder argument is the whole
+    /// point, and a mock that lists a file in every directory hides a wrong one.
+    #[test]
+    fn mock_upload_lands_in_the_folder_it_was_aimed_at() {
+        let c = MockClient::new();
+        let f = std::env::temp_dir().join("drivedrop-mock-upload.txt");
+        std::fs::write(&f, b"x").unwrap();
+
+        let item = c.upload(&f, "/Public", &|_| {}).unwrap();
+        assert_eq!(item.file_id, "/mydrive/Public/drivedrop-mock-upload.txt");
+
+        let names: Vec<String> = c.browse("/Public").unwrap().iter()
+            .map(|e| e.name.clone()).collect();
+        assert!(names.contains(&"drivedrop-mock-upload.txt".to_string()),
+                "the uploaded file must be listed in its folder");
+        assert!(!c.browse("/").unwrap().iter().any(|e| e.name.contains("drivedrop-mock")),
+                "and must not appear at the root");
+
+        // The live client reads the file; so must the mock, or a bad path tests nothing.
+        assert!(c.upload(std::path::Path::new("Z:\\nope.bin"), "/Public", &|_| {}).is_err());
+        let _ = std::fs::remove_file(&f);
     }
 }
